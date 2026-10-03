@@ -103,7 +103,6 @@ const PANE = 'spotify'
 const TICK_MS = 250
 const VIZ_MS = 100
 const VIZ_COLUMNS = 40
-const GREEN = '#1DB954'
 const FLASH_MS = 12_000
 const SKIP_MS = 30_000
 const EVENT_DJ_GAP_MS = 3 * 60_000

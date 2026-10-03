@@ -301,7 +301,7 @@ describe('saved login off Windows', () => {
 
   test('with no keychain the login is stored plain', async ($, on) => {
     const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, { env: {} })
-    const vault = fakeVault(on, {})
+    fakeVault(on, {})
     await $.command.run({ command: 'spotify', args: 'now' } as never)
     expect(store.get('tokens')).toMatchObject({ scheme: 'plain', refresh: 'RT2' })
   })

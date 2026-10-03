@@ -1,22 +1,80 @@
-# Spotify for Claude Code
+<p align="center">
+  <img src="docs/icon.svg" width="128" alt="Spotify for Claude Code">
+</p>
 
-A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that puts Spotify inside your coding session: a player pane with album art and a visualizer, time-synced lyrics, a Claude DJ that learns your taste, a chime when Claude finishes or needs you, a focus timer, your library, and a recap of the session's soundtrack. Every option is on one settings page. Apart from the DJ and the buttons you press, it never changes what's playing.
+<h1 align="center">Spotify for Claude Code</h1>
 
-![The Spotify pane in Claude Code: album art, a visualizer, playback controls, up next and devices, with the now-playing band above the prompt](docs/screenshot.png)
+<p align="center">
+  Spotify inside your coding session: a player, synced lyrics, and a DJ that reads what you are doing.<br>
+  A <a href="https://code.claude.com/docs/en/plugins/mods/overview">Claude Code mod</a>. Apart from the DJ and the buttons you press, it never changes what's playing.
+</p>
 
-## Features
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#set-up-spotify">Set up</a> ·
+  <a href="#settings">Settings</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="LICENSE">License</a>
+</p>
 
-- **Now playing everywhere**: the track in the status line, a band above the prompt with ⏮ ⏯ ⏭ ♥ and the lyric being sung, and a toast when the track changes.
-- **Player pane** (`/spotify`), in six tabs:
-  1. **Player**: album art (small, medium or large), an animated spectrum in the cover's colors, playback controls with hotkeys, search, up next, and device switching. In the desktop app the art and the visualizer are drawn as SVG.
-  2. **Lyrics**: synced lyrics from [LRCLIB](https://lrclib.net) with the current line highlighted. Press a line to jump to it. Nudge the timing earlier or later when a track's lyrics are off; it's remembered per track.
-  3. **DJ**: Claude reads the session, picks a vibe and a set of tracks, says why, and plays or queues them. It learns from DJ picks you skip or like. **Autopilot** re-picks every few turns, and reacts when tests fail (calmer) or go green (upbeat).
-  4. **Recap**: every track played this session next to what Claude was doing meanwhile (files edited, tool calls, tests going red or green), with stats: minutes listened, top artist, your most productive track. Play any row, play it all, save it as a playlist, or copy a summary card.
-  5. **Library**: your playlists, Liked Songs and recently played, one press to play.
-  6. **Settings**: every option below, grouped, with a picker for each.
-- **Sounds**: a sound of your choice (chime, bell, ding, marimba, pop, or Windows' own) when Claude finishes a turn, when it's waiting on you, and when a focus block ends, at its own volume. The music is never touched.
-- **Focus timer**: `/spotify focus 25` shows a countdown above the prompt, then a break timer. It doesn't start, pause or queue anything.
-- **Tools Claude can call**: `now_playing`, `control`, `play`, `search`, `queue`, `devices`. Try asking "play something calm while we debug this". Opt in, and Claude is also told what's playing when the track changed.
+<p align="center">
+  <img src="docs/screenshot.png" width="600" alt="The Spotify pane in Claude Code: album art, a visualizer, playback controls, up next and devices, with the now-playing band above the prompt">
+</p>
+
+## Install
+
+Add this repository as a marketplace and install the plugin:
+
+```
+/plugin marketplace add jewdev/claude-spotify-mod
+/plugin install spotify@claude-spotify-mod
+```
+
+Or load it from a clone for one session:
+
+```
+git clone https://github.com/jewdev/claude-spotify-mod
+claude --plugin-dir ./claude-spotify-mod/spotify
+```
+
+Then [connect your Spotify account](#set-up-spotify). It takes a free Spotify app of your own and two
+commands.
+
+Claude Code v2.1.287 or later, on Windows, macOS or Linux. Free and Premium accounts both work;
+[Premium adds playback control](#free-and-premium-accounts).
+
+## What makes it different
+
+Most music integrations for an editor are a remote control: a status-line track name and a few
+buttons. This one knows it is running inside a coding session, and uses that. The DJ reads the
+conversation, the recap lines the soundtrack up against what Claude was doing, and the sounds tell
+you when Claude needs you without touching the music.
+
+- **Now playing everywhere** — the track in the status line, a band above the prompt with ⏮ ⏯ ⏭ ♥
+  and the lyric being sung, and a toast when the track changes.
+- **A player pane** (`/spotify`) — album art in small, medium or large, an animated spectrum in the
+  cover's colors, playback controls with hotkeys, search, up next, and device switching. In the
+  desktop app the cover is the real image, drawn as SVG; the visualizer stays in the terminal.
+- **Synced lyrics** from [LRCLIB](https://lrclib.net), the current line highlighted. Press a line to
+  jump to it. When a track's lyrics run early or late, nudge them; the offset is remembered per
+  track.
+- **A Claude DJ** — Claude reads the session, picks a vibe and a set of tracks, says why, and plays
+  or queues them. It learns from the picks you skip or like. **Autopilot** re-picks every few turns,
+  and reacts when tests fail (calmer) or go green (upbeat).
+- **A recap of the session's soundtrack** — every track played next to what Claude was doing
+  meanwhile (files edited, tool calls, tests going red or green), with stats: minutes listened, top
+  artist, your most productive track. Play any row, play it all, save it as a playlist, or copy a
+  summary card.
+- **Sounds that leave the music alone** — a chime, bell, ding, marimba, pop or Windows' own sound
+  when Claude finishes a turn, when it's waiting on you, and when a focus block ends, at its own
+  volume.
+- **A focus timer** — `/spotify focus 25` shows a countdown above the prompt, then a break timer. It
+  doesn't start, pause or queue anything.
+- **Your library** — playlists, Liked Songs and recently played, one press to play.
+- **Tools Claude can call** — `now_playing`, `control`, `play`, `search`, `queue`, `devices`. Ask
+  "play something calm while we debug this". Opt in, and Claude is also told what's playing when the
+  track changed.
+- **One settings page** — every option grouped, with a picker for each. Nothing to hand-edit.
 
 ## Requirements
 
@@ -43,22 +101,6 @@ Spotify only lets Premium accounts control playback through its API. The mod rea
 On a free account the playback buttons are hidden, ▶ becomes ↗ (open in Spotify), and Claude's playback tools explain the limit instead of failing.
 
 > **Note for app owners:** Spotify's development mode has its own limits. The app must be owned by a Premium account, and only users added under **User Management** can sign in. If you're on a free account, ask a Premium friend to create the app and add you, or apply for extended quota.
-
-## Install
-
-Add this repository as a marketplace and install the plugin:
-
-```
-/plugin marketplace add jewdev/claude-spotify-mod
-/plugin install spotify@claude-spotify-mod
-```
-
-Or load it from a clone for one session:
-
-```
-git clone https://github.com/jewdev/claude-spotify-mod
-claude --plugin-dir ./claude-spotify-mod/spotify
-```
 
 ## Set up Spotify
 

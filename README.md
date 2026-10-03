@@ -83,10 +83,11 @@ You can also set the client ID in `/config` under the plugin's options.
 | `/spotify dj [hint]` | Claude DJs for the session, e.g. `/spotify dj calm, I'm debugging` |
 | `/spotify autopilot [on\|off]` | Let the DJ follow the session's mood |
 | `/spotify recap [save [name]]` | The session soundtrack, or save it as a playlist |
+| `/spotify recap play [n]` | Play the whole soundtrack, or its track n |
 | `/spotify band` | Show or hide the band above the prompt |
 | `/spotify login` · `logout` · `setup <id>` | Account |
 
-Pane hotkeys: `1`–`4` switch tabs. On the Player tab: `p` play/pause, `n` next, `b` back, `u`/`d` volume up/down, `s` shuffle, `r` repeat, `l` like. `j` spins a DJ set, `a` toggles autopilot, `v` saves the recap.
+Pane hotkeys: `1`–`4` switch tabs. On the Player tab: `p` play/pause, `n` next, `b` back, `u`/`d` volume up/down, `s` shuffle, `r` repeat, `l` like. `j` spins a DJ set, `a` toggles autopilot. On Recap: `p` plays it all, `v` saves it as a playlist, and ▶ on a row plays that track.
 
 ## Privacy and security
 

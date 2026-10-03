@@ -281,3 +281,17 @@ test('a successful /spotify answer draws in green; others stay the engine row', 
   expect(await good.find({ type: 'Text', text: /Connected to Spotify as Ada/ })).toBeDefined()
   await good.unmount()
 })
+
+test('recap rows play their track, and Play all plays the soundtrack', async ($, on) => {
+  const calls = fakeSpotify(on)
+  await $.command.run({ command: 'spotify', args: 'now' } as never)
+  await settle($)
+  const pane = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
+  await pane.press({ key: 'tab-recap' })
+  await pane.press({ key: 'recap-play-0' })
+  const plays = () => calls.filter(c => c.method === 'PUT' && c.url.endsWith('/me/player/play'))
+  expect(plays().at(-1)?.body).toBe(JSON.stringify({ uris: ['spotify:track:t1'] }))
+  await pane.press({ key: 'recap-all' })
+  expect(plays().length).toBe(2)
+  await pane.unmount()
+})

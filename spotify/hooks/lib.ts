@@ -227,4 +227,5 @@ export const USAGE = [
   '/spotify dj [hint]       Claude picks music for what you are working on and queues it',
   '/spotify autopilot       let the DJ re-pick as the session changes mood (on/off)',
   '/spotify recap [save [name]]  the session soundtrack; save it as a playlist',
+  '/spotify recap play [n] play the whole soundtrack, or its track n',
 ].join('\n')

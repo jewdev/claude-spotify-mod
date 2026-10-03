@@ -946,6 +946,18 @@ async function savePlaylist($: Engine, name: string): Promise<string> {
   }
 }
 
+/** A recap row as something to play. */
+function recapItem(e: RecapEntry): SpotifyItem {
+  return { uri: e.uri, kind: e.uri.startsWith('spotify:episode:') ? 'episode' : 'track', title: e.title, subtitle: e.artists }
+}
+
+/** Plays the whole session soundtrack from its first track (Premium). */
+async function playRecap($: Engine): Promise<string> {
+  const uris = [...new Set((await read($, recap)).map(e => e.uri).filter(u => u.startsWith('spotify:track:')))]
+  if (uris.length === 0) return 'Nothing to play yet: no tracks have played this session.'
+  return act($, `Playing the session soundtrack: ${uris.length} tracks.`, () => playerCall($, 'PUT', '/me/player/play', { uris }))
+}
+
 async function pressSave($: Engine) {
   await update($, notice, () => 'Saving the session as a playlist…')
   const text = await savePlaylist($, '')
@@ -1182,6 +1194,12 @@ async function runCommand($: Engine, args: string): Promise<string> {
       return setAutopilot($, arg === 'on' ? true : arg === 'off' ? false : undefined)
     case 'recap': {
       if (/^save\b/i.test(arg)) return savePlaylist($, arg.replace(/^save\s*/i, ''))
+      const playArg = /^play(?:\s+(\d+))?$/i.exec(arg)
+      if (playArg) {
+        if (!playArg[1]) return playRecap($)
+        const entry = (await read($, recap))[Number(playArg[1]) - 1]
+        return entry ? playPick($, recapItem(entry)) : `No track #${playArg[1]} in this session's recap.`
+      }
       await openPane($, 'recap')
       return recapText(await read($, recap))
     }
@@ -1518,19 +1536,36 @@ export const register: Register = (on, options) => {
           {message !== '' && <Text color={good ? GREEN : 'yellow'} wrap="wrap">{message}</Text>}
           <Box flexDirection="column">
             {entries.length > shown.length && <Text dimColor>… {entries.length - shown.length} earlier</Text>}
-            {shown.map(x => (
-              <Box flexDirection="column">
-                <Text wrap="truncate-end">
-                  <Text dimColor>{hhmm(x.at)} </Text>
-                  <Text color="#1DB954">♫ </Text>
-                  {x.title}
-                  <Text dimColor> — {x.artists}</Text>
-                </Text>
-                <Text dimColor wrap="truncate-end">{'      '}{recapLine(x)}</Text>
-              </Box>
-            ))}
+            {shown.map((x, k) => {
+              const i = entries.length - shown.length + k
+              const playing = p?.uri === x.uri
+              return (
+                <Box flexDirection="column">
+                  <Box flexDirection="row" gap={1}>
+                    <Button
+                      key={`recap-play-${i}`}
+                      label={busyText(busy, `recap-play-${i}`, free ? '↗' : playing && p?.isPlaying ? '♫' : '▶', '…')}
+                      plain
+                      dimColor={playing}
+                      onPress={() => quiet(withBusy($, `recap-play-${i}`, () => playPick($, recapItem(x))))}
+                    />
+                    <Box flexShrink={1}>
+                      <Text wrap="truncate-end">
+                        <Text dimColor>{hhmm(x.at)} </Text>
+                        <Text bold={playing} color={playing ? GREEN : undefined}>{x.title}</Text>
+                        <Text dimColor> — {x.artists}</Text>
+                      </Text>
+                    </Box>
+                  </Box>
+                  <Text dimColor wrap="truncate-end">{'    '}{recapLine(x)}</Text>
+                </Box>
+              )
+            })}
           </Box>
-          <Box>
+          <Box flexDirection="row" columnGap={1}>
+            {!free && entries.length > 0 && (
+              <Button key="recap-all" label={busyText(busy, 'recap-all', '▶ Play all', 'starting…')} hotkey="p" onPress={() => quiet(withBusy($, 'recap-all', () => playRecap($)))} />
+            )}
             <Button key="recap-save" label={busyText(busy, 'recap-save', 'Save as playlist', 'Saving…')} hotkey="v" variant="primary" onPress={() => quiet(withBusy($, 'recap-save', () => pressSave($)))} />
           </Box>
         </Box>

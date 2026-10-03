@@ -34,7 +34,7 @@ export function fakeSpotify(
   store: Record<string, unknown> = TOKENS,
   plan: 'premium' | 'free' = 'premium',
   withClock?: (clock: MockClock) => void,
-  env: Record<string, string> = { OS: 'Windows_NT' },
+  { env = { OS: 'Windows_NT' }, player = {} }: { env?: Record<string, string>; player?: Record<string, unknown> } = {},
 ) {
   const calls: Call[] & { store: Map<string, unknown> } = Object.assign([], { store: new Map(Object.entries(store)) })
   on('store.get', (_$, e) => ({ value: calls.store.get(e.key) }) as never)
@@ -78,7 +78,7 @@ export function fakeSpotify(
     if (pathname === '/v1/me/playlists' && method === 'POST') {
       return json(201, { id: 'pl1', external_urls: { spotify: 'https://open.spotify.com/playlist/pl1' } })
     }
-    if (pathname === '/v1/me/player' && method === 'GET') return json(200, PLAYER)
+    if (pathname === '/v1/me/player' && method === 'GET') return json(200, { ...PLAYER, ...player })
     if (pathname === '/v1/me/player/queue') return json(200, { queue: [] })
     if (pathname.endsWith('/contains')) return json(200, [true])
     if (pathname === '/v1/search') {

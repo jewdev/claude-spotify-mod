@@ -16,6 +16,9 @@ import type {
 import {
   ACCOUNTS,
   API,
+  PERL_LISTENER,
+  SIDEBAR_TIP,
+  wantsSidebarTip,
   POWERSHELL_LISTENER,
   PREMIUM_ONLY,
   PYTHON_LISTENER,
@@ -69,6 +72,7 @@ import {
   vizCells,
   vizSvg,
 } from './media'
+import { decodeJpegEighth, resampleHex } from './jpeg'
 import {
   DEFAULT_SETTINGS,
   EMPTY_TASTE,
@@ -538,18 +542,28 @@ async function openBrowser($: Engine, url: string): Promise<boolean> {
   return false
 }
 
-/** Serves the redirect URI for up to five minutes; the callback's path, or undefined. */
+/**
+ * Serves the redirect URI for up to five minutes; the callback's path, or
+ * undefined. Off Windows it tries Perl, then Python: the next one only when
+ * the one before is not installed.
+ */
 async function waitForCallback($: Engine): Promise<string | undefined> {
-  const argv = (await isWindows($))
-    ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_LISTENER]
-    : ['python3', '-c', PYTHON_LISTENER]
-  try {
-    const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 310_000 })
-    const path = stdout.trim()
-    return exitCode === 0 && path.includes('/callback') ? path : undefined
-  } catch {
-    return undefined
+  const tries = (await isWindows($))
+    ? [['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_LISTENER]]
+    : [['perl', '-e', PERL_LISTENER], ['python3', '-c', PYTHON_LISTENER]]
+  for (const argv of tries) {
+    const started = await $.clock.now()
+    try {
+      const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 310_000 })
+      if (exitCode === 127) continue
+      const path = stdout.trim()
+      return exitCode === 0 && path.includes('/callback') ? path : undefined
+    } catch {
+      // a quick failure is a missing program: try the next; a slow one timed out
+      if ((await $.clock.now()) - started > 5000) return undefined
+    }
   }
+  return undefined
 }
 
 async function setPremium($: Engine, value: boolean | null) {
@@ -915,13 +929,11 @@ async function loadArt($: Engine, url: string) {
     await update($, art, () => ({ url, size, columns: size, rows: size / 2, ...cached }))
     return
   }
-  if (artLoading === key || !isSafeImageUrl(url) || !(await isWindows($))) return
+  if (artLoading === key || !isSafeImageUrl(url)) return
   artLoading = key
   try {
-    const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', artScript(url, size)]
-    const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 20_000 })
-    const hex = stdout.trim()
-    if (exitCode !== 0 || hex.length !== size * size * 6) return
+    const hex = (await isWindows($)) ? await artViaPowerShell($, url, size) : await artViaCurl($, url, size)
+    if (hex?.length !== size * size * 6) return
     const drawn = { cells: artCells(hex, size, size), palette: paletteFrom(hex), pixels: hex }
     artCache.set(key, drawn)
     if ((await read($, player))?.imageUrl === url) {
@@ -931,6 +943,25 @@ async function loadArt($: Engine, url: string) {
   } finally {
     artLoading = ''
   }
+}
+
+/** Windows: PowerShell downloads and scales the cover. */
+async function artViaPowerShell($: Engine, url: string, size: number): Promise<string | undefined> {
+  const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', artScript(url, size)]
+  const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 20_000 })
+  return exitCode === 0 ? stdout.trim() : undefined
+}
+
+/** macOS and Linux: curl downloads the cover to a temp file and the mod decodes the JPEG itself. */
+async function artViaCurl($: Engine, url: string, size: number): Promise<string | undefined> {
+  const dir = ((await $.env.get('TMPDIR')) || '/tmp').replace(/\/+$/, '')
+  const file = `${dir}/claude-spotify-art.jpg`
+  const { exitCode } = await $.process.run(['curl', '-sfL', '--max-time', '15', '-o', file, url], { timeoutMs: 20_000 })
+  if (exitCode !== 0) return undefined
+  const got = await $.fs.read(file, { as: 'bytes' })
+  if (typeof got === 'string') return undefined
+  const img = decodeJpegEighth(Uint8Array.from(atob(got.base64), c => c.charCodeAt(0)))
+  return img ? resampleHex(img, size) : undefined
 }
 
 // ---------- actions (each resolves a line describing the outcome) ----------
@@ -1730,7 +1761,14 @@ export const register: Register = (on, options) => {
     return started
   })
 
-  on('command.run', { command: 'spotify' }, async ($, e) => ({ text: await runCommand($, e.args) }))
+  on('command.run', { command: 'spotify' }, async ($, e) => {
+    const text = await runCommand($, e.args)
+    // once ever: the pane opened above the prompt on a terminal wide enough for the sidebar
+    if (!wantsSidebarTip(e.args, e.presentation) || (await $.store.get('sidebarTipShown'))) return { text }
+    await $.store.set('sidebarTipShown', true)
+    return { text: `${text}
+${SIDEBAR_TIP}` }
+  })
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) await update($, paneOpen, () => false)

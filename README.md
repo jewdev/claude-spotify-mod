@@ -23,7 +23,8 @@ A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that 
 - Claude Code v2.1.287 or later (mods)
 - A Spotify account. Free works; Premium adds playback control ([what each gets](#free-and-premium-accounts))
 - A Spotify app of your own (free; steps below)
-- Windows for album art and the chime's system sounds (through PowerShell). Everything else works on macOS and Linux too. On macOS the chime plays a bundled sound; automatic login needs `python3`, otherwise paste the redirect URL.
+- Works on Windows, macOS and Linux. Windows' own system sounds are Windows-only; elsewhere the chime plays a bundled sound.
+- On macOS and Linux: `curl` for album art, and `perl` (or `python3`) for automatic login. macOS and most Linux systems ship both; without them the art is left out and you paste the redirect URL instead.
 - For an encrypted login: nothing extra on Windows (DPAPI) or macOS (Keychain). On Linux, `secret-tool` (package `libsecret-tools` on Debian and Ubuntu, `libsecret` on Fedora and Arch) and a running keyring such as GNOME Keyring or KWallet.
 
 ## Free and Premium accounts
@@ -157,7 +158,6 @@ If the pane opens above the prompt and you want it on the side, run `/tui fullsc
 ## Limitations
 
 - The visualizer is decorative. Spotify no longer offers audio analysis to new apps, so the bars move on a steady beat seeded by the track, not the real audio.
-- Album art needs Windows.
 - On Linux, the encrypted login needs `secret-tool` and an unlocked keyring. Without them (a headless server, for one) the login is stored without encryption.
 - Apps in Spotify's development mode only work for accounts added under **User Management** in the dashboard.
 - Saving playlists needs playlist permissions. If you logged in with an older version, run `/spotify login` again.

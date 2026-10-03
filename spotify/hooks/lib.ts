@@ -96,10 +96,10 @@ export function friendly(status: number, message: string, reason?: string): stri
   return `Spotify ${status}: ${message}`
 }
 
-/** The smallest cover at least 64px wide: the art is drawn at about 20 pixels. */
+/** The smallest cover at least 192px wide: art is drawn up to 24 pixels, and macOS and Linux decode it at one pixel per 8x8 block. */
 function pickImage(images: any): string {
   const list: any[] = Array.isArray(images) ? images : []
-  const fit = list.filter(i => (i?.width ?? 0) >= 64).sort((a, b) => a.width - b.width)[0] ?? list[0]
+  const fit = list.filter(i => (i?.width ?? 0) >= 192).sort((a, b) => a.width - b.width)[0] ?? list[0]
   return typeof fit?.url === 'string' ? fit.url : ''
 }
 
@@ -221,6 +221,46 @@ while not got and time.time() < deadline:
     srv.handle_request()
 print(got[0] if got else '')
 `
+
+/**
+ * The same listener in Perl, which macOS and nearly every Linux ship, so
+ * automatic login needs no Python. The page goes in as hex, out of reach of
+ * Perl's string interpolation.
+ */
+export const PERL_LISTENER = `
+use IO::Socket::INET; use IO::Select;
+my $page = pack('H*', '${Array.from(new TextEncoder().encode(CALLBACK_PAGE), b => b.toString(16).padStart(2, '0')).join('')}');
+my $srv = IO::Socket::INET->new(LocalAddr => '127.0.0.1', LocalPort => 8888, Listen => 5, ReuseAddr => 1) or exit 1;
+my $sel = IO::Select->new($srv);
+my $deadline = time + 300;
+my $got = '';
+while (!$got && time < $deadline) {
+  next unless $sel->can_read(1);
+  my $c = $srv->accept or next;
+  my $line = '';
+  eval { local $SIG{ALRM} = sub { die }; alarm 5; $line = <$c> // ''; while (my $h = <$c>) { last if $h =~ /^\\r?$/ } alarm 0 };
+  my ($path) = $line =~ m{^GET (\\S+)};
+  $path //= '';
+  my $ok = index($path, '/callback') >= 0;
+  print $c ($ok ? 'HTTP/1.1 200 OK' : 'HTTP/1.1 404 Not Found'), "\\r\\nContent-Type: text/html; charset=utf-8\\r\\nConnection: close\\r\\n\\r\\n";
+  print $c $page if $ok;
+  close $c;
+  $got = $path if $ok;
+}
+print "$got\\n";
+`
+
+export const SIDEBAR_TIP = 'Tip: run /tui fullscreen to dock this pane on the right, beside the conversation.'
+
+/**
+ * Whether opening the pane should mention the sidebar: the pane opens above
+ * the prompt (the terminal's main screen) though the terminal is wide enough
+ * to dock it (110 columns).
+ */
+export function wantsSidebarTip(args: string, presentation: { isFullscreen: boolean; columns: number } | undefined): boolean {
+  if (!presentation || presentation.isFullscreen || presentation.columns < 110) return false
+  return ['', 'pane', 'open'].includes(args.trim().toLowerCase())
+}
 
 export const USAGE = [
   '/spotify                 open the player pane',

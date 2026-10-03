@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { recapStats } from '../hooks/media'
-import { clean } from '../hooks/lib'
+import { clean, wantsSidebarTip } from '../hooks/lib'
 import { DEFAULT_SETTINGS, EMPTY_TASTE, artPixels, earnsDoneSound, findSetting, matchOption, mergeSettings, pollDelay, rememberTaste } from '../hooks/settings'
 import { PANE_PROPS, fakeSpotify, settle } from './fake'
 import type { Call } from './fake'
@@ -166,6 +166,15 @@ test('the recap adds session stats', async ($, on) => {
   expect(stats.topArtist).toBe('A')
 })
 
+test('opening the pane suggests the sidebar only where it would dock', () => {
+  expect(wantsSidebarTip('', { isFullscreen: false, columns: 160 })).toBe(true)
+  expect(wantsSidebarTip('open', { isFullscreen: false, columns: 110 })).toBe(true)
+  expect(wantsSidebarTip('', { isFullscreen: true, columns: 160 })).toBe(false)
+  expect(wantsSidebarTip('', { isFullscreen: false, columns: 100 })).toBe(false)
+  expect(wantsSidebarTip('now', { isFullscreen: false, columns: 160 })).toBe(false)
+  expect(wantsSidebarTip('', undefined)).toBe(false)
+})
+
 test('album art defaults to a small cover', () => {
   expect(artPixels(DEFAULT_SETTINGS)).toBe(16)
   expect(artPixels({ ...DEFAULT_SETTINGS, art: 'small' })).toBe(12)
@@ -267,7 +276,7 @@ describe('saved login off Windows', () => {
   }
 
   test('macOS keeps the refresh token in the Keychain, off the command line, and logout removes it', async ($, on) => {
-    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, {})
+    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, { env: {} })
     const vault = fakeVault(on, { security: true })
     await $.command.run({ command: 'spotify', args: 'now' } as never)
     expect(vault.secret).toBe('RT2')
@@ -279,7 +288,7 @@ describe('saved login off Windows', () => {
   })
 
   test('Linux uses the Secret Service through secret-tool, and turning encryption off moves the token back', async ($, on) => {
-    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, {})
+    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, { env: {} })
     const vault = fakeVault(on, { secretTool: true })
     await $.command.run({ command: 'spotify', args: 'now' } as never)
     expect(vault.secret).toBe('RT2')
@@ -291,10 +300,45 @@ describe('saved login off Windows', () => {
   })
 
   test('with no keychain the login is stored plain', async ($, on) => {
-    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, {})
+    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, { env: {} })
     const vault = fakeVault(on, {})
     await $.command.run({ command: 'spotify', args: 'now' } as never)
     expect(store.get('tokens')).toMatchObject({ scheme: 'plain', refresh: 'RT2' })
+  })
+})
+
+describe('login off Windows', () => {
+  /** Answers the browser opener and the listeners; `has` names the ones installed. */
+  function fakeListeners(on: Parameters<typeof fakeSpotify>[0], store: Map<string, unknown>, has: string[]) {
+    const ran: string[] = []
+    on('process.run', (_$, e) => {
+      const tool = e.argv[0]!
+      ran.push(tool)
+      if (tool === 'open') return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+      if (!has.includes(tool)) return { value: { exitCode: 127, stdout: '', stderr: 'not found' } } as never
+      const { state } = store.get('pending') as { state: string }
+      return { value: { exitCode: 0, stdout: `/callback?code=C1&state=${state}
+`, stderr: '' } } as never
+    })
+    return ran
+  }
+
+  test('automatic login uses Perl, which macOS and Linux ship', async ($, on) => {
+    const { store } = fakeSpotify(on, { clientId: 'cid' }, 'premium', undefined, { env: {} })
+    const ran = fakeListeners(on, store, ['perl', 'python3'])
+    await $.command.run({ command: 'spotify', args: 'login' } as never)
+    for (let i = 0; i < 10 && !store.get('tokens'); i++) await settle($)
+    expect(ran.slice(0, 2)).toEqual(['open', 'perl'])
+    expect(store.get('tokens')).toBeDefined()
+  })
+
+  test('without Perl it falls back to Python', async ($, on) => {
+    const { store } = fakeSpotify(on, { clientId: 'cid' }, 'premium', undefined, { env: {} })
+    const ran = fakeListeners(on, store, ['python3'])
+    await $.command.run({ command: 'spotify', args: 'login' } as never)
+    for (let i = 0; i < 10 && !store.get('tokens'); i++) await settle($)
+    expect(ran.slice(0, 3)).toEqual(['open', 'perl', 'python3'])
+    expect(store.get('tokens')).toBeDefined()
   })
 })
 

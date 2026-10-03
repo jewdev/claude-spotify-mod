@@ -231,6 +231,28 @@ async function waitForCallback($: Engine): Promise<string | undefined> {
   }
 }
 
+/** "Connected to Spotify as Name (Premium)." — the account the new tokens belong to. */
+async function connectedMessage($: Engine): Promise<string> {
+  try {
+    const me = await api($, 'GET', '/me')
+    const who = me?.display_name || me?.id
+    const tier = me?.product === 'premium' ? ' (Premium)' : me?.product ? ` (${me.product}: playback control needs Premium)` : ''
+    return who ? `✓ Connected to Spotify as ${who}${tier}.` : '✓ Connected to Spotify.'
+  } catch {
+    return '✓ Connected to Spotify.'
+  }
+}
+
+/** Tells the person the login worked: a transcript line that stays, a toast, and the pane's notice. */
+async function announceConnected($: Engine): Promise<string> {
+  const text = await connectedMessage($)
+  const hint = (await read($, player)) ? '' : ' Play something, then try /spotify.'
+  $.ui.log(`spotify: ${text}${hint}`)
+  $.ui.toast(text, { timeoutMs: 8000 })
+  await update($, notice, () => text)
+  return text + hint
+}
+
 async function listenForLogin($: Engine) {
   if (loginRunning) return
   loginRunning = true
@@ -238,9 +260,8 @@ async function listenForLogin($: Engine) {
     const path = await waitForCallback($)
     if (!path) return
     await finishLogin($, path)
-    await update($, notice, () => 'Connected to Spotify.')
-    $.ui.toast('Spotify connected ♫')
     await refresh($, true)
+    await announceConnected($)
   } catch (err) {
     await update($, notice, () => errText(err))
     $.ui.toast(`Spotify login failed: ${errText(err)}`)
@@ -1000,7 +1021,7 @@ async function runCommand($: Engine, args: string): Promise<string> {
       try {
         await finishLogin($, arg)
         await refresh($, true)
-        return 'Connected to Spotify.'
+        return await connectedMessage($)
       } catch (err) {
         return errText(err)
       }

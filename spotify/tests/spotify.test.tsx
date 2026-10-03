@@ -46,6 +46,10 @@ function fakeSpotify(on: On, store: Record<string, unknown> = TOKENS) {
     if (hostname === 'lrclib.net' && pathname === '/api/get') {
       return json(200, { syncedLyrics: '[00:00.50] Around the world\n[00:59.00] Around the world, again\n[01:30.00] Third line' })
     }
+    if (hostname === 'accounts.spotify.com') {
+      return json(200, { access_token: 'AT2', refresh_token: 'RT2', expires_in: 3600, scope: 'playlist-modify-private' })
+    }
+    if (pathname === '/v1/me' && method === 'GET') return json(200, { id: 'u1', display_name: 'Ada', product: 'premium' })
     if (pathname === '/v1/me/playlists' && method === 'POST') {
       return json(201, { id: 'pl1', external_urls: { spotify: 'https://open.spotify.com/playlist/pl1' } })
     }
@@ -214,4 +218,10 @@ test('saving the recap creates a playlist with the session tracks', async ($, on
   expect(text).toContain('Saved "Late night refactor" with 1 tracks')
   const add = calls.find(c => c.method === 'POST' && c.url.endsWith('/playlists/pl1/items'))
   expect(add?.body).toBe(JSON.stringify({ uris: ['spotify:track:t1'] }))
+})
+
+test('finishing login names the connected account', async ($, on) => {
+  fakeSpotify(on, { clientId: 'cid', pending: { verifier: 'v', state: 's1' } })
+  const { text } = await $.command.run({ command: 'spotify', args: 'code http://127.0.0.1:8888/callback?code=abc&state=s1' } as never)
+  expect(text).toBe('✓ Connected to Spotify as Ada (Premium).')
 })

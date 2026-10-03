@@ -226,6 +226,78 @@ describe('customizing', () => {
   })
 })
 
+describe('saved login off Windows', () => {
+  const EXPIRED = { clientId: 'cid', tokens: { access: 'AT', refresh: 'RT', expiresAt: 0 } }
+
+  /** A fake system keychain: `security` (macOS) and/or `secret-tool` (Linux), whichever `has` names. */
+  function fakeVault(on: Parameters<typeof fakeSpotify>[0], has: { security?: boolean; secretTool?: boolean }) {
+    const vault: { secret?: string; argv: string[] } = { argv: [] }
+    on('process.run', (_$, e) => {
+      vault.argv.push(e.argv.join(' '))
+      const stdin = e.init?.stdin
+      const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } }) as never
+      const fail = { value: { exitCode: 44, stdout: '', stderr: 'not found' } } as never
+      const [tool, verb] = e.argv
+      if (tool === 'security' && has.security) {
+        if (verb === '-i') {
+          vault.secret = /-w "([^"]+)"/.exec(stdin ?? '')?.[1]
+          return ok()
+        }
+        if (verb === 'find-generic-password') return vault.secret ? ok(`${vault.secret}
+`) : fail
+        if (verb === 'delete-generic-password') {
+          vault.secret = undefined
+          return ok()
+        }
+      }
+      if (tool === 'secret-tool' && has.secretTool) {
+        if (verb === 'store') {
+          vault.secret = stdin
+          return ok()
+        }
+        if (verb === 'lookup') return vault.secret ? ok(vault.secret) : fail
+        if (verb === 'clear') {
+          vault.secret = undefined
+          return ok()
+        }
+      }
+      return { value: { exitCode: 127, stdout: '', stderr: `${tool}: command not found` } } as never
+    })
+    return vault
+  }
+
+  test('macOS keeps the refresh token in the Keychain, off the command line, and logout removes it', async ($, on) => {
+    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, {})
+    const vault = fakeVault(on, { security: true })
+    await $.command.run({ command: 'spotify', args: 'now' } as never)
+    expect(vault.secret).toBe('RT2')
+    expect(store.get('tokens')).toEqual({ scheme: 'keychain', expiresAt: expect.any(Number), scope: 'playlist-modify-private' })
+    expect(vault.argv.some(a => a.includes('RT2'))).toBe(false)
+    await $.command.run({ command: 'spotify', args: 'logout' } as never)
+    expect(vault.secret).toBeUndefined()
+    expect(store.get('tokens')).toBeUndefined()
+  })
+
+  test('Linux uses the Secret Service through secret-tool, and turning encryption off moves the token back', async ($, on) => {
+    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, {})
+    const vault = fakeVault(on, { secretTool: true })
+    await $.command.run({ command: 'spotify', args: 'now' } as never)
+    expect(vault.secret).toBe('RT2')
+    expect(store.get('tokens')).toMatchObject({ scheme: 'secret-service' })
+    await $.command.run({ command: 'spotify', args: 'set protectTokens off' } as never)
+    await settle($)
+    expect(store.get('tokens')).toMatchObject({ scheme: 'plain', refresh: 'RT2' })
+    expect(vault.secret).toBeUndefined()
+  })
+
+  test('with no keychain the login is stored plain', async ($, on) => {
+    const { store } = fakeSpotify(on, EXPIRED, 'premium', undefined, {})
+    const vault = fakeVault(on, {})
+    await $.command.run({ command: 'spotify', args: 'now' } as never)
+    expect(store.get('tokens')).toMatchObject({ scheme: 'plain', refresh: 'RT2' })
+  })
+})
+
 test('the settings page toggles, previews and marks changes, on every surface that draws it', async ($, on) => {
   fakeSpotify(on)
   await $.command.run({ command: 'spotify', args: 'now' } as never)

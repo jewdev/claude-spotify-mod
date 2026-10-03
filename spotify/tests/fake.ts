@@ -34,10 +34,20 @@ export function fakeSpotify(
   store: Record<string, unknown> = TOKENS,
   plan: 'premium' | 'free' = 'premium',
   withClock?: (clock: MockClock) => void,
+  env: Record<string, string> = { OS: 'Windows_NT' },
 ) {
-  const calls: Call[] = []
-  mock.store(on, store)
-  mock.env(on, { OS: 'Windows_NT' })
+  const calls: Call[] & { store: Map<string, unknown> } = Object.assign([], { store: new Map(Object.entries(store)) })
+  on('store.get', (_$, e) => ({ value: calls.store.get(e.key) }) as never)
+  on('store.set', (_$, e) => {
+    calls.store.set(e.key, e.value)
+    return { value: undefined } as never
+  })
+  on('store.delete', (_$, e) => {
+    calls.store.delete(e.key)
+    return { value: undefined } as never
+  })
+  on('store.keys', () => ({ value: [...calls.store.keys()] }) as never)
+  mock.env(on, env)
   if (withClock) withClock(mock.clock(on, { now: 1_000 }))
   else {
     on('clock.now', () => ({ value: 1_000 }))

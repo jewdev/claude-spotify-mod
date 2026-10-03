@@ -42,6 +42,13 @@ import {
   DJ_INSTRUCTIONS,
   DPAPI_PROTECT,
   DPAPI_UNPROTECT,
+  KEYCHAIN_CLEAR,
+  KEYCHAIN_READ,
+  SECRET_TOOL_CLEAR,
+  SECRET_TOOL_READ,
+  SECRET_TOOL_SAVE,
+  isVaultSafe,
+  keychainSaveInput,
   artCells,
   artScript,
   soundScript,
@@ -131,12 +138,18 @@ const TOOL_SEARCH = 'mcp__spotify__search'
 const TOOL_QUEUE = 'mcp__spotify__queue'
 const TOOL_DEVICES = 'mcp__spotify__devices'
 
-/** What the store keeps of a login: the refresh token plain, or DPAPI-encrypted on Windows. */
+/** Where a login's refresh token is kept outside the store: the macOS Keychain or Linux's Secret Service. */
+type Vault = 'keychain' | 'secret-service'
+
+/**
+ * What the store keeps of a login: the refresh token plain, DPAPI-encrypted on
+ * Windows, or only a note that it sits in the system keychain (macOS, Linux).
+ */
 type StoredTokens = {
   access?: string
   refresh?: string
   refreshEnc?: string
-  scheme?: 'plain' | 'dpapi'
+  scheme?: 'plain' | 'dpapi' | Vault
   expiresAt: number
   scope?: string
 }
@@ -311,6 +324,8 @@ async function hasTokens($: Engine): Promise<boolean> {
 
 async function logout($: Engine) {
   memAccess = null
+  const stored = (await $.store.get('tokens')) as StoredTokens | undefined
+  if (isVault(stored?.scheme)) await vaultClear($, stored.scheme)
   await $.store.delete('tokens')
   await $.store.delete('pending')
 }
@@ -328,25 +343,79 @@ async function dpapi($: Engine, script: string, input: string): Promise<string |
   }
 }
 
-/** Saves a login: with encryption on (Windows), the refresh token is DPAPI-encrypted and the access token kept in memory. */
-async function saveTokens($: Engine, t: Tokens) {
+function isVault(scheme: StoredTokens['scheme']): scheme is Vault {
+  return scheme === 'keychain' || scheme === 'secret-service'
+}
+
+/** Runs a keychain tool; its trimmed output on success, else undefined (a missing tool throws, caught here). */
+async function vaultRun($: Engine, argv: string[], stdin?: string): Promise<string | undefined> {
+  try {
+    const { exitCode, stdout } = await $.process.run(argv, { stdin, timeoutMs: 30_000 })
+    return exitCode === 0 ? stdout.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function vaultRead($: Engine, vault: Vault): Promise<string | undefined> {
+  const out = await vaultRun($, vault === 'keychain' ? KEYCHAIN_READ : SECRET_TOOL_READ)
+  return out || undefined
+}
+
+async function vaultClear($: Engine, vault: Vault) {
+  await vaultRun($, vault === 'keychain' ? KEYCHAIN_CLEAR : SECRET_TOOL_CLEAR)
+}
+
+/**
+ * Saves the refresh token in the system keychain: the macOS Keychain through
+ * `security`, else the Secret Service (GNOME Keyring, KWallet) through
+ * `secret-tool`. The token goes on stdin, never a command line, and counts as
+ * saved only once it reads back. Which one took it, or undefined for neither.
+ */
+async function vaultSave($: Engine, secret: string): Promise<Vault | undefined> {
+  if (!isVaultSafe(secret)) return undefined
+  if ((await vaultRun($, ['security', '-i'], keychainSaveInput(secret))) !== undefined && (await vaultRead($, 'keychain')) === secret) {
+    return 'keychain'
+  }
+  if ((await vaultRun($, SECRET_TOOL_SAVE, secret)) !== undefined && (await vaultRead($, 'secret-service')) === secret) {
+    return 'secret-service'
+  }
+  return undefined
+}
+
+/**
+ * Saves a login. With encryption on, the refresh token is DPAPI-encrypted on
+ * Windows or put in the system keychain elsewhere, and the access token kept
+ * in memory; with it off, or where neither works, both are stored plain.
+ */
+async function saveTokens($: Engine, t: Tokens): Promise<StoredTokens['scheme']> {
   memAccess = { token: t.access, expiresAt: t.expiresAt }
-  if (isOn(cfg, 'protectTokens') && (await isWindows($))) {
-    const enc = await dpapi($, DPAPI_PROTECT, t.refresh)
-    if (enc) {
-      const stored: StoredTokens = { refreshEnc: enc, scheme: 'dpapi', expiresAt: t.expiresAt, scope: t.scope }
-      await $.store.set('tokens', stored)
-      return
+  const before = (await $.store.get('tokens')) as StoredTokens | undefined
+  let stored: StoredTokens | undefined
+  if (isOn(cfg, 'protectTokens')) {
+    if (await isWindows($)) {
+      const enc = await dpapi($, DPAPI_PROTECT, t.refresh)
+      if (enc) stored = { refreshEnc: enc, scheme: 'dpapi', expiresAt: t.expiresAt, scope: t.scope }
+    } else {
+      const vault = await vaultSave($, t.refresh)
+      if (vault) stored = { scheme: vault, expiresAt: t.expiresAt, scope: t.scope }
     }
   }
-  const stored: StoredTokens = { access: t.access, refresh: t.refresh, scheme: 'plain', expiresAt: t.expiresAt, scope: t.scope }
+  stored ??= { access: t.access, refresh: t.refresh, scheme: 'plain', expiresAt: t.expiresAt, scope: t.scope }
   await $.store.set('tokens', stored)
+  if (isVault(before?.scheme) && before.scheme !== stored.scheme) await vaultClear($, before.scheme)
+  return stored.scheme
 }
 
 async function refreshTokenOf($: Engine, stored: StoredTokens): Promise<string> {
   if (stored.scheme === 'dpapi') {
     const plain = stored.refreshEnc ? await dpapi($, DPAPI_UNPROTECT, stored.refreshEnc) : undefined
     if (!plain) throw new SpotifyError('Could not decrypt the saved Spotify login. Run /spotify login.', 401, 'not_logged_in')
+    return plain
+  }
+  if (isVault(stored.scheme)) {
+    const plain = await vaultRead($, stored.scheme)
+    if (!plain) throw new SpotifyError('Could not read the saved Spotify login from the system keychain. Run /spotify login.', 401, 'not_logged_in')
     return plain
   }
   return stored.refresh ?? ''
@@ -358,8 +427,17 @@ async function resaveTokens($: Engine) {
   if (!stored) return
   const refreshToken = await refreshTokenOf($, stored)
   const access = memAccess?.token ?? stored.access ?? ''
-  await saveTokens($, { access, refresh: refreshToken, expiresAt: memAccess?.expiresAt ?? stored.expiresAt, scope: stored.scope })
-  await say($, isOn(cfg, 'protectTokens') ? 'Saved login encrypted.' : 'Saved login stored without encryption.')
+  const scheme = await saveTokens($, { access, refresh: refreshToken, expiresAt: memAccess?.expiresAt ?? stored.expiresAt, scope: stored.scope })
+  await say($, protectionNote(scheme))
+}
+
+/** What a save came to, for the person who turned encryption on or off. */
+function protectionNote(scheme: StoredTokens['scheme']): string {
+  if (scheme === 'dpapi') return 'Saved login encrypted with Windows DPAPI.'
+  if (scheme === 'keychain') return 'Saved login moved to the macOS Keychain.'
+  if (scheme === 'secret-service') return 'Saved login moved to the system keyring.'
+  if (!isOn(cfg, 'protectTokens')) return 'Saved login stored without encryption.'
+  return 'No system keychain answered (on Linux, install secret-tool and run a keyring); saved login stored without encryption.'
 }
 
 async function beginLogin($: Engine): Promise<string> {

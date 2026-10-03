@@ -348,6 +348,34 @@ export const DPAPI_UNPROTECT = [
   '[Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))',
 ].join('; ')
 
+// ---------- host helpers (macOS Keychain, Linux Secret Service) ----------
+
+/** Where the login sits in the system keychain: one item, named by service and account. */
+export const VAULT_SERVICE = 'claude-code-spotify'
+export const VAULT_ACCOUNT = 'refresh-token'
+
+/** Spotify's refresh tokens are URL-safe; anything else is refused rather than quoted. */
+export function isVaultSafe(secret: string): boolean {
+  return /^[A-Za-z0-9._~+/=-]{1,4096}$/.test(secret)
+}
+
+/**
+ * The `security -i` command that saves the secret in the login keychain,
+ * fed on stdin so the token never reaches a command line.
+ */
+export function keychainSaveInput(secret: string): string {
+  return `add-generic-password -U -a ${VAULT_ACCOUNT} -s ${VAULT_SERVICE} -w "${secret}"
+`
+}
+
+export const KEYCHAIN_READ = ['security', 'find-generic-password', '-a', VAULT_ACCOUNT, '-s', VAULT_SERVICE, '-w']
+export const KEYCHAIN_CLEAR = ['security', 'delete-generic-password', '-a', VAULT_ACCOUNT, '-s', VAULT_SERVICE]
+
+/** `secret-tool store` reads the secret from stdin. */
+export const SECRET_TOOL_SAVE = ['secret-tool', 'store', '--label=Claude Code Spotify login', 'service', VAULT_SERVICE, 'account', VAULT_ACCOUNT]
+export const SECRET_TOOL_READ = ['secret-tool', 'lookup', 'service', VAULT_SERVICE, 'account', VAULT_ACCOUNT]
+export const SECRET_TOOL_CLEAR = ['secret-tool', 'clear', 'service', VAULT_SERVICE, 'account', VAULT_ACCOUNT]
+
 /** A short system sound: `done` or `waiting`. */
 /** Plays a .wav at `volume` (0..1) through Windows' media player, then waits for it to finish. */
 export function soundScript(path: string, volume: number): string {

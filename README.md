@@ -23,7 +23,8 @@ A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that 
 - Claude Code v2.1.287 or later (mods)
 - A Spotify account. Free works; Premium adds playback control ([what each gets](#free-and-premium-accounts))
 - A Spotify app of your own (free; steps below)
-- Windows for album art, the chime's system sounds and encrypted login (all through PowerShell). Everything else works on macOS and Linux too. On macOS the chime plays a bundled sound; automatic login needs `python3`, otherwise paste the redirect URL.
+- Windows for album art and the chime's system sounds (through PowerShell). Everything else works on macOS and Linux too. On macOS the chime plays a bundled sound; automatic login needs `python3`, otherwise paste the redirect URL.
+- For an encrypted login: nothing extra on Windows (DPAPI) or macOS (Keychain). On Linux, `secret-tool` (package `libsecret-tools` on Debian and Ubuntu, `libsecret` on Fedora and Arch) and a running keyring such as GNOME Keyring or KWallet.
 
 ## Free and Premium accounts
 
@@ -108,7 +109,7 @@ Open the **Settings** tab (`/spotify settings`, or `6` in the pane), or use `/sp
 | Focus | `focusLength` | 25, 15, 50, 90 | Minutes per focus block |
 | | `breakLength` | 5, 0, 10, 15 | Minutes of break timer after it |
 | Claude | `shareNowPlaying` | off, on | A short note with your next prompt when the track changed |
-| Privacy | `protectTokens` | on, off | Encrypt the saved login with Windows DPAPI |
+| Privacy | `protectTokens` | on, off | Encrypt the saved login: Windows DPAPI, the macOS Keychain, or the Secret Service on Linux |
 
 Sound settings have a **▶ test** button on the settings page. None of the sounds or timers change what's playing: only the DJ and the buttons you press do.
 
@@ -147,7 +148,7 @@ If the pane opens above the prompt and you want it on the side, run `/tui fullsc
 
 ## Privacy and security
 
-- Your client ID and login are stored by Claude Code in the plugin's store under your Claude configuration directory, never in this repository. On Windows the refresh token is encrypted with DPAPI for your user account (passed to PowerShell on stdin, never on a command line), and the short-lived access token is kept in memory only. `/spotify logout` deletes it all.
+- Your client ID and login are stored by Claude Code in the plugin's store under your Claude configuration directory, never in this repository. With `protectTokens` on (the default), the refresh token is encrypted for your user account and the short-lived access token is kept in memory only. On Windows that's DPAPI, through PowerShell. On macOS the token goes in your login Keychain, through `security`. On Linux it goes to the Secret Service (GNOME Keyring, KWallet), through `secret-tool`. Either way, the token is passed on stdin, never on a command line. Where no keychain answers, the login is stored without encryption; switching the setting on says so. `/spotify logout` deletes it all.
 - The mod talks to `api.spotify.com`, `accounts.spotify.com`, and `lrclib.net` (lyrics: track name, artist, album and duration only), and downloads cover images from Spotify's CDN.
 - The DJ sends a summary of your session to Claude through Claude Code's own model calls: a fork of the current conversation, or a short activity summary for autopilot. It uses your plan's usage. Its taste memory (tracks you skipped or liked) stays in the plugin's store.
 - With `shareNowPlaying` on, the track's name and artist are added to the conversation before your next prompt.
@@ -156,7 +157,8 @@ If the pane opens above the prompt and you want it on the side, run `/tui fullsc
 ## Limitations
 
 - The visualizer is decorative. Spotify no longer offers audio analysis to new apps, so the bars move on a steady beat seeded by the track, not the real audio.
-- Album art and the encrypted login need Windows. On other systems the login is stored without encryption.
+- Album art needs Windows.
+- On Linux, the encrypted login needs `secret-tool` and an unlocked keyring. Without them (a headless server, for one) the login is stored without encryption.
 - Apps in Spotify's development mode only work for accounts added under **User Management** in the dashboard.
 - Saving playlists needs playlist permissions. If you logged in with an older version, run `/spotify login` again.
 

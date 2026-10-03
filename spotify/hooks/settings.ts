@@ -114,7 +114,7 @@ export const SETTINGS: readonly SettingDef[] = [
   // Claude
   { key: 'shareNowPlaying', group: 'Claude', label: "Tell Claude what's playing", help: 'A short note with your next prompt when the track changed.', options: ONOFF, default: 'off' },
   // Privacy
-  { key: 'protectTokens', group: 'Privacy', label: 'Encrypt saved login', help: 'Encrypt the refresh token with Windows DPAPI (Windows only).', options: ONOFF, default: 'on' },
+  { key: 'protectTokens', group: 'Privacy', label: 'Encrypt saved login', help: 'Keep the refresh token encrypted: Windows DPAPI, the macOS Keychain, or the Secret Service on Linux (GNOME Keyring, KWallet).', options: ONOFF, default: 'on' },
 ]
 
 /** The settings page's groups, in order, with the line under each one's title. */

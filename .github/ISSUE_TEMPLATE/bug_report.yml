@@ -1,0 +1,42 @@
+name: Bug report
+description: Something in the mod doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead. Paste any message the mod showed.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Claude Code version
+      description: The output of `claude --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: layout
+    attributes:
+      label: Where the pane opens
+      description: On the right is Claude Code's fullscreen layout (`/tui fullscreen`); above the prompt is the default one.
+      options: [On the right, Above the prompt, In the desktop app, Not sure]
+  - type: dropdown
+    id: plan
+    attributes:
+      label: Spotify account
+      options: [Premium, Free]
+  - type: textarea
+    id: debug
+    attributes:
+      label: Debug log (optional)
+      description: Lines starting with `spotify:` from `claude --debug`. Remove anything private first.
+      render: text

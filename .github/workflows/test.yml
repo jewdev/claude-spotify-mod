@@ -20,3 +20,31 @@ jobs:
         run: claude plugin validate spotify
       - name: Run the tests
         run: claude plugin test spotify
+
+  # The unit tests fake the platform; these run the real keychain, Perl
+  # login listener and album art commands on each system.
+  smoke-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Keychain, login listener and album art
+        run: npx -y tsx scripts/smoke.mts
+
+  smoke-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install secret-tool and a keyring
+        run: sudo apt-get update && sudo apt-get install -y libsecret-tools gnome-keyring dbus-x11
+      - name: Keychain, login listener and album art
+        run: |
+          dbus-run-session -- bash -c '
+            echo -n ci | gnome-keyring-daemon --unlock --components=secrets --replace >/dev/null
+            npx -y tsx scripts/smoke.mts
+          '

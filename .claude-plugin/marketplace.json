@@ -4,13 +4,13 @@
     "name": "jewdev"
   },
   "metadata": {
-    "description": "Spotify mods for Claude Code."
+    "description": "Spotify inside Claude Code."
   },
   "plugins": [
     {
       "name": "spotify",
       "source": "./spotify",
-      "description": "Spotify player, synced lyrics, Claude DJ and session recap for Claude Code."
+      "description": "Spotify inside Claude Code: player pane with album art and a visualizer, synced lyrics, a Claude DJ that learns your taste, a chime when Claude finishes or needs you, a focus timer, your library, a session recap, and a settings page."
     }
   ]
 }

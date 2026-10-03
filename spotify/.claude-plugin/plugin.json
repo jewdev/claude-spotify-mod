@@ -1,6 +1,6 @@
 {
   "name": "spotify",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Spotify inside Claude Code: player pane with album art and a visualizer, synced lyrics, a Claude DJ that learns your taste, a chime when Claude finishes or needs you, a focus timer, your library, a session recap, and a settings page.",
   "author": {
     "name": "jewdev"

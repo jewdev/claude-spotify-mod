@@ -1,0 +1,16 @@
+{
+  "name": "claude-spotify-mod",
+  "owner": {
+    "name": "jewdev"
+  },
+  "metadata": {
+    "description": "Spotify mods for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "spotify",
+      "source": "./spotify",
+      "description": "Spotify player, synced lyrics, Claude DJ and session recap for Claude Code."
+    }
+  ]
+}

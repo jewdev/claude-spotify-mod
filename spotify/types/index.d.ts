@@ -58,6 +58,8 @@ export type SpotifyDj = {
   picks: SpotifyItem[]
   source: 'session' | 'hint' | 'autopilot' | ''
   at: number
+  /** On a free account the set is saved as a playlist: its link. */
+  link: string
 }
 
 export type RecapEntry = {
@@ -90,6 +92,8 @@ declare module 'claude-code' {
       dj: SpotifyDj
       autopilot: boolean
       recap: RecapEntry[]
+      /** true Premium, false free, null not known yet. */
+      premium: boolean | null
     }
   }
 }

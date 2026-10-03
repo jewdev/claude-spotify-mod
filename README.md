@@ -15,9 +15,26 @@ A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that 
 ## Requirements
 
 - Claude Code v2.1.287 or later (mods)
-- Spotify Premium, for playback control
+- A Spotify account. Free works; Premium adds playback control ([what each gets](#free-and-premium-accounts))
 - A Spotify app of your own (free; steps below)
 - Album art: Windows (it's rendered with PowerShell and System.Drawing) in a terminal session. Everything else works on macOS and Linux too. Automatic login there needs `python3`; otherwise paste the redirect URL.
+
+## Free and Premium accounts
+
+Spotify only lets Premium accounts control playback through its API. The mod reads your plan when you log in and adapts:
+
+| | Free | Premium |
+| --- | --- | --- |
+| Now playing, album art, visualizer, synced lyrics | ✓ | ✓ |
+| Search, like/unlike, device list, session recap | ✓ | ✓ |
+| Save the recap as a playlist | ✓ | ✓ |
+| Play, pause, skip, volume, seek, shuffle, repeat, queue, switch device | Opens tracks in Spotify instead | ✓ |
+| Claude DJ | Saves the set as a playlist and opens it | Plays or queues the set |
+| DJ autopilot | — | ✓ |
+
+On a free account the playback buttons are hidden, ▶ becomes ↗ (open in Spotify), and Claude's playback tools explain the limit instead of failing.
+
+> **Note for app owners:** Spotify's development mode has its own limits. The app must be owned by a Premium account, and only users added under **User Management** can sign in. If you're on a free account, ask a Premium friend to create the app and add you, or apply for extended quota.
 
 ## Install
 

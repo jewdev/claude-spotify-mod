@@ -28,7 +28,7 @@ const PLAYER = {
 type Call = { method: string; url: string; body?: string }
 
 /** Fakes the Spotify Web API beneath the plugin and records every request. */
-function fakeSpotify(on: On, store: Record<string, unknown> = TOKENS) {
+function fakeSpotify(on: On, store: Record<string, unknown> = TOKENS, plan: 'premium' | 'free' = 'premium') {
   const calls: Call[] = []
   mock.store(on, store)
   mock.env(on, { OS: 'Windows_NT' })
@@ -49,7 +49,10 @@ function fakeSpotify(on: On, store: Record<string, unknown> = TOKENS) {
     if (hostname === 'accounts.spotify.com') {
       return json(200, { access_token: 'AT2', refresh_token: 'RT2', expires_in: 3600, scope: 'playlist-modify-private' })
     }
-    if (pathname === '/v1/me' && method === 'GET') return json(200, { id: 'u1', display_name: 'Ada', product: 'premium' })
+    if (pathname === '/v1/me' && method === 'GET') return json(200, { id: 'u1', display_name: 'Ada', product: plan })
+    if (plan === 'free' && pathname.startsWith('/v1/me/player/') && method !== 'GET') {
+      return json(403, { error: { status: 403, message: 'Player command failed: Premium required', reason: 'PREMIUM_REQUIRED' } })
+    }
     if (pathname === '/v1/me/playlists' && method === 'POST') {
       return json(201, { id: 'pl1', external_urls: { spotify: 'https://open.spotify.com/playlist/pl1' } })
     }
@@ -224,4 +227,49 @@ test('finishing login names the connected account', async ($, on) => {
   fakeSpotify(on, { clientId: 'cid', pending: { verifier: 'v', state: 's1' } })
   const { text } = await $.command.run({ command: 'spotify', args: 'code http://127.0.0.1:8888/callback?code=abc&state=s1' } as never)
   expect(text).toBe('✓ Connected to Spotify as Ada (Premium).')
+})
+
+describe('free account', () => {
+  test('learns the plan from Spotify and stops sending player commands', async ($, on) => {
+    const calls = fakeSpotify(on, TOKENS, 'free')
+    const first = await $.command.run({ command: 'spotify', args: 'pause' } as never)
+    expect(first.text).toContain('Premium')
+    const before = calls.length
+    const second = await $.command.run({ command: 'spotify', args: 'next' } as never)
+    expect(second.text).toContain('Playback control needs Spotify Premium')
+    expect(calls.slice(before).some(c => c.url.includes('/me/player/next'))).toBe(false)
+  })
+
+  test('play opens the match in Spotify instead', async ($, on) => {
+    fakeSpotify(on, TOKENS, 'free')
+    await $.command.run({ command: 'spotify', args: 'pause' } as never)
+    const { text } = await $.command.run({ command: 'spotify', args: 'play one more time' } as never)
+    expect(text).toContain('https://open.spotify.com/track/t9')
+  })
+
+  test('the pane hides playback controls', async ($, on) => {
+    fakeSpotify(on, TOKENS, 'free')
+    await $.command.run({ command: 'spotify', args: 'now' } as never)
+    await $.command.run({ command: 'spotify', args: 'pause' } as never)
+    const pane = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
+    expect(await pane.find({ key: 'toggle' })).toBeUndefined()
+    expect(await pane.find({ type: 'Text', text: /Free account/ })).toBeDefined()
+    expect(await pane.find({ key: 'like' })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('the DJ saves its set as a playlist instead of queueing', async ($, on) => {
+    const calls = fakeSpotify(on, SCOPED, 'free')
+    const reply = '{"vibe":"deep focus","reason":"Refactoring.","tracks":[{"title":"One More Time","artist":"Daft Punk"}]}'
+    on('model.fork', () => ({ value: { isAnswered: true, text: reply, usage: {} } }) as never)
+    await $.command.run({ command: 'spotify', args: 'now' } as never)
+    await $.command.run({ command: 'spotify', args: 'pause' } as never)
+    const pane = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
+    await pane.press({ key: 'tab-dj' })
+    await pane.press({ key: 'dj-spin' })
+    expect(calls.some(c => c.method === 'POST' && c.url.endsWith('/playlists/pl1/items'))).toBe(true)
+    expect(calls.some(c => c.method === 'POST' && c.url.includes('/me/player/queue'))).toBe(false)
+    expect(await pane.find({ key: 'dj-open' })).toBeDefined()
+    await pane.unmount()
+  })
 })

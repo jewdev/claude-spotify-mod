@@ -5,6 +5,7 @@ export const REDIRECT_URI = 'http://127.0.0.1:8888/callback'
 export const ACCOUNTS = 'https://accounts.spotify.com'
 export const API = 'https://api.spotify.com/v1'
 export const SCOPES = [
+  'user-read-private',
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-read-currently-playing',
@@ -29,6 +30,15 @@ export class SpotifyError extends Error {
   ) {
     super(message)
   }
+}
+
+export const PREMIUM_ONLY =
+  'Playback control needs Spotify Premium. On a free account, play in the Spotify app; here you can still see what is playing, read lyrics, search, like tracks and make playlists.'
+
+/** spotify:track:abc → https://open.spotify.com/track/abc (what a free account can open). */
+export function webUrl(uri: string): string {
+  const [, kind, id] = uri.split(':')
+  return kind && id ? `https://open.spotify.com/${kind}/${id}` : 'https://open.spotify.com'
 }
 
 export const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))

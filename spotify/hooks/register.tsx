@@ -6,6 +6,7 @@ import {
   ACCOUNTS,
   API,
   POWERSHELL_LISTENER,
+  PREMIUM_ONLY,
   PYTHON_LISTENER,
   REDIRECT_URI,
   SCOPES,
@@ -22,6 +23,7 @@ import {
   parseQuery,
   toItem,
   toPlayer,
+  webUrl,
 } from './lib'
 import type { Pending, SearchKind, Tokens } from './lib'
 import {
@@ -64,10 +66,11 @@ const pos = atom({ plugin: 'spotify', key: 'pos' } as const, 0)
 const lyrics = atom({ plugin: 'spotify', key: 'lyrics' } as const, null)
 const lyricIndex = atom({ plugin: 'spotify', key: 'lyricIndex' } as const, -1)
 const art = atom({ plugin: 'spotify', key: 'art' } as const, null)
-const IDLE_DJ: SpotifyDj = { status: 'idle', vibe: '', reason: '', picks: [], source: '', at: 0 }
+const IDLE_DJ: SpotifyDj = { status: 'idle', vibe: '', reason: '', picks: [], source: '', at: 0, link: '' }
 const dj = atom({ plugin: 'spotify', key: 'dj' } as const, IDLE_DJ)
 const autopilot = atom({ plugin: 'spotify', key: 'autopilot' } as const, false)
 const recap = atom({ plugin: 'spotify', key: 'recap' } as const, [])
+const premium = atom({ plugin: 'spotify', key: 'premium' } as const, null)
 
 const TOOL_NOW = 'mcp__spotify__now_playing'
 const TOOL_CONTROL = 'mcp__spotify__control'
@@ -232,11 +235,29 @@ async function waitForCallback($: Engine): Promise<string | undefined> {
 }
 
 /** "Connected to Spotify as Name (Premium)." — the account the new tokens belong to. */
+async function setPremium($: Engine, value: boolean | null) {
+  if ((await read($, premium)) === value) return
+  await update($, premium, () => value)
+  await $.store.set('premium', value)
+  if (value === false && (await read($, autopilot))) {
+    await update($, autopilot, () => false)
+    await $.store.set('autopilot', false)
+  }
+}
+
+/** Reads the account's plan from /me (needs user-read-private; unknown without it). */
+async function detectPlan($: Engine): Promise<any> {
+  const me = await api($, 'GET', '/me')
+  const product = me?.product
+  await setPremium($, product === 'premium' ? true : typeof product === 'string' ? false : null)
+  return me
+}
+
 async function connectedMessage($: Engine): Promise<string> {
   try {
-    const me = await api($, 'GET', '/me')
+    const me = await detectPlan($)
     const who = me?.display_name || me?.id
-    const tier = me?.product === 'premium' ? ' (Premium)' : me?.product ? ` (${me.product}: playback control needs Premium)` : ''
+    const tier = me?.product === 'premium' ? ' (Premium)' : me?.product ? ' (free account: see, search, like and make playlists; play in the Spotify app)' : ''
     return who ? `✓ Connected to Spotify as ${who}${tier}.` : '✓ Connected to Spotify.'
   } catch {
     return '✓ Connected to Spotify.'
@@ -308,6 +329,7 @@ async function api($: Engine, method: string, path: string, body?: unknown): Pro
   if (!res.ok) {
     const err = data?.error
     const message = typeof err === 'string' ? err : err?.message ?? res.text.slice(0, 160)
+    if (err?.reason === 'PREMIUM_REQUIRED') await setPremium($, false)
     throw new SpotifyError(friendly(res.status, message, err?.reason), res.status, err?.reason)
   }
   return data
@@ -315,6 +337,7 @@ async function api($: Engine, method: string, path: string, body?: unknown): Pro
 
 /** A player command; with no active device, moves playback to one and retries. */
 async function playerCall($: Engine, method: string, path: string, body?: unknown): Promise<void> {
+  if ((await read($, premium)) === false) throw new SpotifyError(PREMIUM_ONLY, 403, 'PREMIUM_REQUIRED')
   try {
     await api($, method, path, body)
   } catch (err) {
@@ -644,7 +667,17 @@ async function like($: Engine, liked: boolean | undefined) {
   })
 }
 
+async function openInSpotify($: Engine, item: SpotifyItem): Promise<string> {
+  const opened = await openBrowser($, webUrl(item.uri))
+  const text = opened
+    ? `Opened ${item.kind} "${item.title}" in Spotify. A free account can't start playback from here.`
+    : `Open ${item.kind} "${item.title}" in Spotify: ${webUrl(item.uri)}`
+  await update($, notice, () => text)
+  return text
+}
+
 async function playPick($: Engine, item: SpotifyItem) {
+  if ((await read($, premium)) === false) return openInSpotify($, item)
   return act($, `Playing ${item.kind} "${item.title}" (${item.subtitle}).`, () => playItem($, item))
 }
 
@@ -779,14 +812,22 @@ async function runDj($: Engine, source: SpotifyDj['source'], hint: string) {
     )
     const picks = hits.filter((x): x is SpotifyItem => x !== undefined)
     if (picks.length === 0) throw new Error('None of the DJ picks were found on Spotify.')
+    const at = await $.clock.now()
+    if ((await read($, premium)) === false) {
+      const link = await djPlaylist($, plan.vibe, plan.reason, picks)
+      await update($, dj, () => ({ status: 'done', vibe: plan.vibe, reason: plan.reason, picks, source, at, link }))
+      const text = link ? `DJ · ${plan.vibe}: saved ${picks.length} tracks as a playlist and opened it.` : `DJ · ${plan.vibe}: ${picks.length} picks. ${RELOGIN}`
+      $.ui.toast(text, { timeoutMs: 8000 })
+      await update($, notice, () => text)
+      return
+    }
     const p = await read($, player)
     if (!p?.isPlaying && source !== 'autopilot') {
       await playerCall($, 'PUT', '/me/player/play', { uris: picks.map(x => x.uri) })
     } else {
       for (const x of picks) await playerCall($, 'POST', `/me/player/queue?uri=${encodeURIComponent(x.uri)}`)
     }
-    const at = await $.clock.now()
-    await update($, dj, () => ({ status: 'done', vibe: plan.vibe, reason: plan.reason, picks, source, at }))
+    await update($, dj, () => ({ status: 'done', vibe: plan.vibe, reason: plan.reason, picks, source, at, link: '' }))
     const verb = !p?.isPlaying && source !== 'autopilot' ? 'playing' : 'queued'
     $.ui.toast(`DJ · ${plan.vibe}: ${picks.length} tracks ${verb}`)
     await update($, notice, () => `DJ ${verb} ${picks.length} tracks: ${plan.vibe}.`)
@@ -799,6 +840,7 @@ async function runDj($: Engine, source: SpotifyDj['source'], hint: string) {
 }
 
 async function setAutopilot($: Engine, on: boolean | undefined) {
+  if ((await read($, premium)) === false && on !== false) return `Autopilot queues music, which ${PREMIUM_ONLY.charAt(0).toLowerCase()}${PREMIUM_ONLY.slice(1)}`
   const next = await update($, autopilot, a => on ?? !a)
   await $.store.set('autopilot', next)
   return next
@@ -820,9 +862,47 @@ async function noteActivity($: Engine, file: string | undefined, failed: boolean
 
 const RELOGIN = 'Spotify needs playlist permission first: run /spotify login once more, approve, then save again.'
 
+function hasPlaylistScope(tokens: Tokens | undefined): boolean {
+  return tokens?.scope?.includes('playlist-modify') === true
+}
+
+/** Creates a private playlist of `uris`; resolves its link. */
+async function createPlaylist($: Engine, title: string, description: string, uris: string[]): Promise<string> {
+  let list: any
+  try {
+    list = await api($, 'POST', '/me/playlists', { name: title, description, public: false })
+  } catch (err) {
+    if (!(err instanceof SpotifyError) || (err.status !== 404 && err.status !== 405)) throw err
+    const me = await api($, 'GET', '/me')
+    list = await api($, 'POST', `/users/${encodeURIComponent(me.id)}/playlists`, { name: title, description, public: false })
+  }
+  for (let i = 0; i < uris.length; i += 100) {
+    const chunk = uris.slice(i, i + 100)
+    try {
+      await api($, 'POST', `/playlists/${list.id}/items`, { uris: chunk })
+    } catch (err) {
+      if (!(err instanceof SpotifyError) || (err.status !== 404 && err.status !== 405)) throw err
+      await api($, 'POST', `/playlists/${list.id}/tracks`, { uris: chunk })
+    }
+  }
+  return list.external_urls?.spotify ?? webUrl(`spotify:playlist:${list.id}`)
+}
+
+/** A free account's DJ set: saved as a playlist and opened; '' when that is not allowed. */
+async function djPlaylist($: Engine, vibe: string, reason: string, picks: SpotifyItem[]): Promise<string> {
+  if (!hasPlaylistScope((await $.store.get('tokens')) as Tokens | undefined)) return ''
+  try {
+    const link = await createPlaylist($, `Claude DJ · ${vibe}`, reason.slice(0, 280), picks.map(x => x.uri))
+    await openBrowser($, link)
+    return link
+  } catch {
+    return ''
+  }
+}
+
 async function savePlaylist($: Engine, name: string): Promise<string> {
   const tokens = (await $.store.get('tokens')) as Tokens | undefined
-  if (!tokens?.scope?.includes('playlist-modify')) return RELOGIN
+  if (!hasPlaylistScope(tokens)) return RELOGIN
   const entries = await read($, recap)
   const uris = [...new Set(entries.map(e => e.uri).filter(u => u.startsWith('spotify:track:')))]
   if (uris.length === 0) return 'Nothing to save yet: no tracks have played this session.'
@@ -830,25 +910,8 @@ async function savePlaylist($: Engine, name: string): Promise<string> {
   const title = name || `Claude Code session · ${first ? new Date(first.at).toDateString() : ''}`.trim()
   const description = `Soundtrack of a Claude Code session: ${entries.length} tracks.`
   try {
-    let list: any
-    try {
-      list = await api($, 'POST', '/me/playlists', { name: title, description, public: false })
-    } catch (err) {
-      if (!(err instanceof SpotifyError) || (err.status !== 404 && err.status !== 405)) throw err
-      const me = await api($, 'GET', '/me')
-      list = await api($, 'POST', `/users/${encodeURIComponent(me.id)}/playlists`, { name: title, description, public: false })
-    }
-    for (let i = 0; i < uris.length; i += 100) {
-      const chunk = uris.slice(i, i + 100)
-      try {
-        await api($, 'POST', `/playlists/${list.id}/items`, { uris: chunk })
-      } catch (err) {
-        if (!(err instanceof SpotifyError) || (err.status !== 404 && err.status !== 405)) throw err
-        await api($, 'POST', `/playlists/${list.id}/tracks`, { uris: chunk })
-      }
-    }
-    const link = list.external_urls?.spotify ?? ''
-    return `Saved "${title}" with ${uris.length} tracks.${link ? ` ${link}` : ''}`
+    const link = await createPlaylist($, title, description, uris)
+    return `Saved "${title}" with ${uris.length} tracks. ${link}`
   } catch (err) {
     if (err instanceof SpotifyError && (err.status === 403 || err.status === 401)) {
       return `${RELOGIN} (Spotify said: ${err.message})`
@@ -1118,6 +1181,9 @@ export const register: Register = (on, options) => {
     })
     await registerTools($)
     if ((await $.store.get('autopilot')) === true) await update($, autopilot, () => true)
+    const plan = await $.store.get('premium')
+    if (typeof plan === 'boolean') await update($, premium, () => plan)
+    if (await hasTokens($)) quiet(detectPlan($))
     quiet(refresh($, true))
     $.clock.every(POLL_MS, () => quiet(refresh($, false)))
     $.clock.every(TICK_MS, () => quiet(tick($)))
@@ -1145,7 +1211,8 @@ export const register: Register = (on, options) => {
     turnsSinceDj += 1
     const due = turnsSinceDj >= 4 || turnFailures >= 3
     const p = await read($, player)
-    if (due && p?.isPlaying && !djRunning && (await read($, autopilot))) quiet(runDj($, 'autopilot', ''))
+    const free = (await read($, premium)) === false
+    if (due && !free && p?.isPlaying && !djRunning && (await read($, autopilot))) quiet(runDj($, 'autopilot', ''))
     return done
   })
 
@@ -1207,6 +1274,7 @@ export const register: Register = (on, options) => {
     if (!p || (await read($, bandHidden))) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const line = await currentLyric($)
+    const canControl = (await read($, premium)) !== false
 
     return (
       <Box flexDirection="column">
@@ -1219,9 +1287,9 @@ export const register: Register = (on, options) => {
             </Text>
           </Box>
           {e.props.bodyColumns > 70 && <Text dimColor>{clock(p.progressMs)}/{clock(p.durationMs)}</Text>}
-          <Button key="band-prev" label="⏮" plain onPress={() => quiet(back($))} />
-          <Button key="band-toggle" label={p.isPlaying ? '⏸' : '▶'} plain onPress={() => quiet(toggle($))} />
-          <Button key="band-next" label="⏭" plain onPress={() => quiet(skip($))} />
+          {canControl && <Button key="band-prev" label="⏮" plain onPress={() => quiet(back($))} />}
+          {canControl && <Button key="band-toggle" label={p.isPlaying ? '⏸' : '▶'} plain onPress={() => quiet(toggle($))} />}
+          {canControl && <Button key="band-next" label="⏭" plain onPress={() => quiet(skip($))} />}
           <Button key="band-like" label={p.liked ? '♥' : '♡'} plain onPress={() => quiet(like($, undefined))} />
           <Button key="band-open" label="☰" plain dimColor onPress={() => quiet(openPane($, undefined))} />
         </Box>
@@ -1264,6 +1332,7 @@ export const register: Register = (on, options) => {
 
     const current = await read($, tab)
     const p = await read($, player)
+    const free = (await read($, premium)) === false
     const tabs = (
       <Box flexDirection="row" columnGap={1}>
         <Button key="tab-player" label="Player" hotkey="1" variant={current === 'player' ? 'primary' : undefined} dimColor={current !== 'player'} onPress={() => quiet(showTab($, 'player'))} />
@@ -1356,7 +1425,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column">
               {d.picks.map((x, i) => (
                 <Box flexDirection="row" gap={1}>
-                  <Button key={`dj-play-${i}`} label="▶" plain onPress={() => quiet(playPick($, x))} />
+                  <Button key={`dj-play-${i}`} label={free ? '↗' : '▶'} plain onPress={() => quiet(playPick($, x))} />
                   <Box flexShrink={1}>
                     <Text wrap="truncate-end">
                       {x.title}
@@ -1368,10 +1437,15 @@ export const register: Register = (on, options) => {
             </Box>
           )}
           <Box flexDirection="row" columnGap={1}>
-            <Button key="dj-spin" label={d.status === 'thinking' ? 'picking…' : 'Spin a set'} hotkey="j" variant="primary" onPress={() => quiet(runDj($, 'session', ''))} />
-            <Button key="dj-auto" label={`Autopilot: ${auto ? 'on' : 'off'}`} hotkey="a" onPress={() => quiet(setAutopilot($, undefined))} />
+            <Button key="dj-spin" label={d.status === 'thinking' ? 'picking…' : free ? 'Make a playlist' : 'Spin a set'} hotkey="j" variant="primary" onPress={() => quiet(runDj($, 'session', ''))} />
+            {!free && <Button key="dj-auto" label={`Autopilot: ${auto ? 'on' : 'off'}`} hotkey="a" onPress={() => quiet(setAutopilot($, undefined))} />}
+            {free && d.link !== '' && <Button key="dj-open" label="Open playlist" hotkey="o" onPress={() => quiet(openBrowser($, d.link))} />}
           </Box>
-          <Text dimColor wrap="wrap">Autopilot re-picks every few turns, and when tool calls start failing. /spotify dj &lt;hint&gt; steers it.</Text>
+          <Text dimColor wrap="wrap">
+            {free
+              ? 'Free account: the DJ saves its picks as a playlist and opens it in Spotify. /spotify dj <hint> steers it.'
+              : 'Autopilot re-picks every few turns, and when tool calls start failing. /spotify dj <hint> steers it.'}
+          </Text>
           {message !== '' && <Text dimColor wrap="wrap">{message}</Text>}
         </Box>
       )
@@ -1461,6 +1535,14 @@ export const register: Register = (on, options) => {
           />
         )}
 
+        {free ? (
+          <Box flexDirection="column">
+            <Box flexDirection="row" columnGap={1}>
+              <Button key="like" label={p?.liked ? '♥ liked' : '♡ like'} hotkey="l" onPress={() => quiet(like($, undefined))} />
+            </Box>
+            <Text dimColor wrap="wrap">Free account: play, pause and skip in the Spotify app. ↗ opens a track there.</Text>
+          </Box>
+        ) : (
         <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
           <Button key="prev" label="⏮ prev" hotkey="b" onPress={() => quiet(back($))} />
           <Button key="toggle" label={p?.isPlaying ? '⏸ pause' : '▶ play'} hotkey="p" variant="primary" onPress={() => quiet(toggle($))} />
@@ -1471,6 +1553,7 @@ export const register: Register = (on, options) => {
           <Button key="repeat" label={`repeat ${p?.repeat ?? 'off'}`} hotkey="r" onPress={() => quiet(cycleRepeat($))} />
           <Button key="like" label={p?.liked ? '♥ liked' : '♡ like'} hotkey="l" onPress={() => quiet(like($, undefined))} />
         </Box>
+        )}
 
         {message !== '' && <Text dimColor wrap="wrap">{message}</Text>}
 
@@ -1494,8 +1577,8 @@ export const register: Register = (on, options) => {
             </Box>
             {found.map((x, i) => (
               <Box flexDirection="row" gap={1}>
-                <Button key={`play-${i}`} label="▶" plain onPress={() => quiet(playPick($, x))} />
-                {x.kind === 'track' ? (
+                <Button key={`play-${i}`} label={free ? '↗' : '▶'} plain onPress={() => quiet(playPick($, x))} />
+                {x.kind === 'track' && !free ? (
                   <Button key={`queue-${i}`} label="+" plain dimColor onPress={() => quiet(enqueue($, x.uri, `"${x.title}"`))} />
                 ) : (
                   <Text> </Text>
@@ -1527,7 +1610,8 @@ export const register: Register = (on, options) => {
             <Text bold>Devices</Text>
             <Button key="load-devices" label="refresh" plain dimColor onPress={() => quiet(loadDevices($))} />
           </Box>
-          {devs.map((d, i) => (
+          {free && devs.map(d => <Text dimColor={!d.isActive}>{`${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`}</Text>)}
+          {!free && devs.map((d, i) => (
             <Button
               key={`dev-${i}`}
               label={`${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`}

@@ -2362,7 +2362,10 @@ ${SIDEBAR_TIP}` }
     const at = await read($, pos)
     const shownPos = p ? (p.isPlaying ? Math.max(at, p.progressMs) : p.progressMs) : 0
     const line = await currentLyric($)
-    const showArt = cover !== null && p !== null && cover.url === p.imageUrl && width >= 50 && s.art !== 'off'
+    // the terminal draws cells (Raster); every other surface draws SVG, whatever else resolve() lists
+    const drawsCells = e.surface === 'terminal'
+    // cells sit beside the track info, so the terminal needs the width; an SVG cover goes on top in a narrow pane
+    const showArt = cover !== null && p !== null && cover.url === p.imageUrl && (width >= 50 || !drawsCells) && s.art !== 'off'
     const vizColumns = Math.min(VIZ_COLUMNS, width)
     const vizRows = Number(s.vizHeight ?? 5)
     const showViz = p !== null && isOn(s, 'visualizer')
@@ -2373,7 +2376,7 @@ ${SIDEBAR_TIP}` }
         <Text wrap="truncate-end">{p.artists}</Text>
         <Text dimColor wrap="truncate-end">{p.album}</Text>
         <Text>
-          <Text color={GREEN}>{bar(shownPos, p.durationMs, Math.min(30, width - (showArt ? cover.columns + 16 : 14)))}</Text>
+          <Text color={GREEN}>{bar(shownPos, p.durationMs, Math.min(30, width - (showArt && width >= 50 ? cover.columns + 16 : 14)))}</Text>
           <Text dimColor> {clock(shownPos)} / {clock(p.durationMs)}</Text>
         </Text>
         <Text dimColor wrap="truncate-end">
@@ -2386,11 +2389,11 @@ ${SIDEBAR_TIP}` }
     )
 
     let artElement = null
-    if (showArt && 'Raster' in ui) artElement = <ui.Raster key="art" columns={cover.columns} rows={cover.rows} cells={cover.cells} />
+    if (showArt && drawsCells && 'Raster' in ui) artElement = <ui.Raster key="art" columns={cover.columns} rows={cover.rows} cells={cover.cells} />
     else if (showArt && 'Svg' in ui) artElement = <ui.Svg source={artSvg(cover.pixels, cover.size, Math.max(3, Math.round(120 / cover.size)))} alt={`Cover of ${p.album}`} />
 
     let vizElement = null
-    if (showViz && 'Raster' in ui) {
+    if (showViz && drawsCells && 'Raster' in ui) {
       vizElement = <ui.Raster key="viz" columns={vizColumns} rows={vizRows} cells={vizCells(vizColumns, vizRows, shownPos, p.id, cover?.palette ?? [], p.isPlaying ? 1 : 0)} />
     } else if (showViz && 'Svg' in ui) {
       vizElement = <ui.Svg source={vizSvg(24, p.id, cover?.palette ?? [], p.isPlaying)} alt="Visualizer" isInteractive />
@@ -2400,7 +2403,7 @@ ${SIDEBAR_TIP}` }
       <Box flexDirection="column" gap={1}>
         {tabs}
         {artElement ? (
-          <Box flexDirection="row" gap={2}>
+          <Box flexDirection={width >= 50 ? 'row' : 'column'} gap={width >= 50 ? 2 : 1}>
             {artElement}
             {info}
           </Box>

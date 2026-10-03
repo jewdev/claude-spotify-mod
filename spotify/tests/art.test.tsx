@@ -30,6 +30,33 @@ describe('album art decoder', () => {
   })
 })
 
+test('the desktop app gets the cover and the visualizer as SVG, at any width; the terminal gets cells', async ($, on) => {
+  fakeSpotify(on, undefined, 'premium', undefined, {
+    player: { item: { type: 'track', id: 't1', uri: 'spotify:track:t1', name: 'Around the World', duration_ms: 180_000, artists: [{ name: 'Daft Punk' }], album: { name: 'Homework', images: [{ url: 'https://i.scdn.co/image/cover300', width: 300 }] } } },
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'ff0000'.repeat(16 * 16), stderr: '' } }) as never)
+  await $.command.run({ command: 'spotify', args: 'now' } as never)
+  // the cover arrives in the background
+  for (let i = 0; i < 10; i++) {
+    const probe = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
+    const ready = await probe.find({ key: 'art' })
+    await probe.unmount()
+    if (ready) break
+    await settle($)
+  }
+  for (const bodyColumns of [80, 34]) {
+    const pane = await $.ui.mount({ plugin: 'spotify', surface: 'desktop', component: 'Pane', requestId: 'spotify', props: { ...(PANE_PROPS as object), bodyColumns } as never })
+    const svgs = (await pane.findAll({ type: 'Svg' })).map(x => (x.props as { alt: string }).alt)
+    expect(svgs).toEqual(['Cover of Homework', 'Visualizer'])
+    expect(await pane.find({ type: 'Raster' })).toBeUndefined()
+    await pane.unmount()
+  }
+  const terminal = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
+  expect(await terminal.find({ key: 'art' })).toBeDefined()
+  expect(await terminal.find({ type: 'Svg' })).toBeUndefined()
+  await terminal.unmount()
+})
+
 test('macOS and Linux draw the cover: curl downloads it and the mod decodes it', async ($, on) => {
   const COVER = 'https://i.scdn.co/image/cover300'
   fakeSpotify(on, undefined, 'premium', undefined, {

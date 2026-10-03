@@ -1,5 +1,6 @@
 // Pure helpers for lyrics, the cell-grid drawings, the DJ and the session recap.
 import type { LyricLine, RecapEntry } from '../types'
+import { clean } from './lib'
 
 // ---------- lyrics (LRCLIB) ----------
 
@@ -9,7 +10,7 @@ export function parseLrc(lrc: string): LyricLine[] {
   for (const raw of lrc.split(/\r?\n/)) {
     const stamps = [...raw.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)]
     if (stamps.length === 0) continue
-    const text = raw.replace(/\[[^\]]*\]/g, '').trim()
+    const text = clean(raw.replace(/\[[^\]]*\]/g, ''))
     for (const m of stamps) out.push({ t: Math.round((Number(m[1]) * 60 + Number(m[2])) * 1000), text })
   }
   return out.sort((a, b) => a.t - b.t)
@@ -237,4 +238,118 @@ export function recapLine(e: RecapEntry): string {
 export function recapText(entries: readonly RecapEntry[]): string {
   if (entries.length === 0) return 'No tracks yet this session.'
   return entries.map(e => `${hhmm(e.at)}  ♫ ${e.title} — ${e.artists}\n        ${recapLine(e)}`).join('\n')
+}
+
+export type RecapStats = {
+  tracks: number
+  minutes: number
+  topArtist: string
+  topArtistCount: number
+  busiest: RecapEntry | null
+  files: number
+  failures: number
+}
+
+/** Listening time is the gap to the next track (capped at 10 min), the last one up to `now`. */
+export function recapStats(entries: readonly RecapEntry[], now: number): RecapStats {
+  const counts = new Map<string, number>()
+  let ms = 0
+  let busiest: RecapEntry | null = null
+  const files = new Set<string>()
+  let failures = 0
+  entries.forEach((e, i) => {
+    const end = entries[i + 1]?.at ?? now
+    ms += Math.max(0, Math.min(end - e.at, 10 * 60_000))
+    const artist = e.artists.split(',')[0]!.trim()
+    counts.set(artist, (counts.get(artist) ?? 0) + 1)
+    if (!busiest || e.tools + e.files.length * 3 > busiest.tools + busiest.files.length * 3) busiest = e
+    e.files.forEach(f => files.add(f))
+    failures += e.failures
+  })
+  let topArtist = ''
+  let topArtistCount = 0
+  for (const [a, n] of counts) if (n > topArtistCount) [topArtist, topArtistCount] = [a, n]
+  const top = busiest as RecapEntry | null
+  return {
+    tracks: entries.length,
+    minutes: Math.round(ms / 60_000),
+    topArtist,
+    topArtistCount,
+    busiest: top && top.tools > 0 ? top : null,
+    files: files.size,
+    failures,
+  }
+}
+
+/** A shareable text card of the session's soundtrack. */
+export function recapCard(entries: readonly RecapEntry[], now: number): string {
+  const s = recapStats(entries, now)
+  const lines = [
+    '♫ My Claude Code session soundtrack',
+    `${s.tracks} tracks · ${s.minutes} min · ${s.files} files touched`,
+    s.topArtist ? `Top artist: ${s.topArtist} (${s.topArtistCount}×)` : '',
+    s.busiest ? `Most productive track: "${s.busiest.title}" by ${s.busiest.artists} (${recapLine(s.busiest)})` : '',
+    '',
+    ...entries.slice(-10).map(e => `${hhmm(e.at)}  ${e.title} — ${e.artists}`),
+  ]
+  return lines.filter((l, i) => l !== '' || i === 4).join('\n')
+}
+
+// ---------- desktop drawings (Svg) ----------
+
+const hex6 = (c: number) => `#${(c & 0xffffff).toString(16).padStart(6, '0')}`
+
+/** Album art as an SVG of square pixels, for surfaces without Raster. */
+export function artSvg(hex: string, size: number, px: number): string {
+  const rects: string[] = []
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const c = hex.slice((y * size + x) * 6, (y * size + x) * 6 + 6)
+      if (c.length === 6) rects.push(`<rect x="${x}" y="${y}" width="1.05" height="1.05" fill="#${c}"/>`)
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size * px}" height="${size * px}" shape-rendering="crispEdges">${rects.join('')}</svg>`
+}
+
+/** The visualizer as SVG bars that animate on their own (SMIL), for surfaces without Raster. */
+export function vizSvg(bars: number, seed: string, palette: readonly number[], isPlaying: boolean): string {
+  const lo = hex6(palette[0] ?? 0x1db954)
+  const hi = hex6(palette[1] ?? 0x1ed7a0)
+  const w = 8
+  const h = 60
+  const out: string[] = []
+  for (let i = 0; i < bars; i++) {
+    const p = hash(`${seed}:${i}`)
+    const tall = Math.round(h * (0.35 + 0.6 * p))
+    const short = Math.round(h * (0.1 + 0.2 * p))
+    const dur = (0.5 + p * 0.9).toFixed(2)
+    const anim = isPlaying
+      ? `<animate attributeName="height" values="${short};${tall};${short}" dur="${dur}s" repeatCount="indefinite"/><animate attributeName="y" values="${h - short};${h - tall};${h - short}" dur="${dur}s" repeatCount="indefinite"/>`
+      : ''
+    out.push(`<rect x="${i * (w + 2)}" y="${h - short}" width="${w}" height="${short}" rx="2" fill="url(#g)">${anim}</rect>`)
+  }
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${bars * (w + 2)} ${h}" width="${bars * (w + 2)}" height="${h}">` +
+    `<defs><linearGradient id="g" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="${lo}"/><stop offset="1" stop-color="${hi}"/></linearGradient></defs>` +
+    `${out.join('')}</svg>`
+  )
+}
+
+// ---------- host helpers (Windows PowerShell) ----------
+
+/** Encrypts stdin with DPAPI for the current Windows user; prints the ciphertext. */
+export const DPAPI_PROTECT =
+  '$t = [Console]::In.ReadToEnd(); ConvertFrom-SecureString (ConvertTo-SecureString $t -AsPlainText -Force)'
+
+/** Decrypts a DPAPI ciphertext read from stdin; prints the secret. */
+export const DPAPI_UNPROTECT = [
+  '$c = [Console]::In.ReadToEnd().Trim()',
+  '$s = ConvertTo-SecureString $c',
+  '[Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))',
+].join('; ')
+
+/** A short system sound: `done` or `waiting`. */
+export function chimeScript(kind: 'done' | 'waiting'): string {
+  const sound = kind === 'done' ? 'Asterisk' : 'Exclamation'
+  return `[System.Media.SystemSounds]::${sound}.Play(); Start-Sleep -Milliseconds 700`
 }

@@ -1,7 +1,7 @@
 {
   "name": "spotify",
   "version": "0.2.0",
-  "description": "Spotify inside Claude Code: player pane with album art and a visualizer, synced lyrics, a Claude DJ that picks music for what you are working on, a session soundtrack recap, /spotify controls, and tools Claude can use.",
+  "description": "Spotify inside Claude Code: player pane with album art and a visualizer, synced lyrics, a Claude DJ that learns your taste, a chime when Claude finishes or needs you, a focus timer, your library, a session recap, and a settings page.",
   "author": {
     "name": "jewdev"
   },
@@ -22,18 +22,6 @@
       "title": "Spotify client ID",
       "description": "Client ID of your app at developer.spotify.com (redirect URI http://127.0.0.1:8888/callback). Can also be set with /spotify setup <id>.",
       "default": ""
-    },
-    "showBand": {
-      "type": "boolean",
-      "title": "Show now-playing band",
-      "description": "Show the now-playing row with controls above the prompt.",
-      "default": true
-    },
-    "notify": {
-      "type": "boolean",
-      "title": "Toast on track change",
-      "description": "Show a toast when the track changes.",
-      "default": true
     }
   }
 }

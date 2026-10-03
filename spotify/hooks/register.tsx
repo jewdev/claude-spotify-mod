@@ -1,7 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { RecapEntry, SpotifyDevice, SpotifyDj, SpotifyItem, SpotifyLyrics, SpotifyPlayer, SpotifyTab } from '../types'
+import type {
+  LibraryView,
+  RecapEntry,
+  SpotifyDevice,
+  SpotifyDj,
+  SpotifyFocus,
+  SpotifyItem,
+  SpotifyLibrary,
+  SpotifyLyrics,
+  SpotifyPlayer,
+  SpotifyTab,
+} from '../types'
 import {
   ACCOUNTS,
   API,
@@ -22,16 +33,20 @@ import {
   parseJson,
   parseQuery,
   toItem,
+  clean,
   toPlayer,
   webUrl,
 } from './lib'
 import type { Pending, SearchKind, Tokens } from './lib'
 import {
-  ART_SIZE,
   DJ_INSTRUCTIONS,
+  DPAPI_PROTECT,
+  DPAPI_UNPROTECT,
   artCells,
   artScript,
+  artSvg,
   basename,
+  chimeScript,
   hhmm,
   isSafeImageUrl,
   isTestCommand,
@@ -39,19 +54,43 @@ import {
   paletteFrom,
   parseDjPlan,
   parseLrc,
+  recapCard,
   recapLine,
+  recapStats,
   recapText,
   vizCells,
+  vizSvg,
 } from './media'
+import {
+  DEFAULT_SETTINGS,
+  EMPTY_TASTE,
+  SETTINGS,
+  artPixels,
+  clockLeft,
+  findSetting,
+  matchOption,
+  mergeSettings,
+  noticeMs,
+  on as isOn,
+  optionLabel,
+  pollDelay,
+  rememberTaste,
+  tasteNote,
+} from './settings'
+import type { Settings, Taste } from './settings'
 
 type Engine = EngineInterface
 
 const PANE = 'spotify'
-const POLL_MS = 3000
 const TICK_MS = 250
 const VIZ_MS = 100
 const VIZ_COLUMNS = 40
 const VIZ_ROWS = 5
+const GREEN = '#1DB954'
+const FLASH_MS = 12_000
+const SKIP_MS = 30_000
+const EVENT_DJ_GAP_MS = 3 * 60_000
+const GROUPS = [...new Set(SETTINGS.map(s => s.group))]
 
 const authed = atom({ plugin: 'spotify', key: 'authed' } as const, false)
 const player = atom({ plugin: 'spotify', key: 'player' } as const, null)
@@ -59,22 +98,25 @@ const notice = atom({ plugin: 'spotify', key: 'notice' } as const, '')
 const results = atom({ plugin: 'spotify', key: 'results' } as const, [])
 const upNext = atom({ plugin: 'spotify', key: 'upNext' } as const, [])
 const devices = atom({ plugin: 'spotify', key: 'devices' } as const, [])
-const bandHidden = atom({ plugin: 'spotify', key: 'bandHidden' } as const, false)
 const paneOpen = atom({ plugin: 'spotify', key: 'paneOpen' } as const, false)
 const tab = atom({ plugin: 'spotify', key: 'tab' } as const, 'player')
 const pos = atom({ plugin: 'spotify', key: 'pos' } as const, 0)
 const lyrics = atom({ plugin: 'spotify', key: 'lyrics' } as const, null)
 const lyricIndex = atom({ plugin: 'spotify', key: 'lyricIndex' } as const, -1)
+const lyricOffset = atom({ plugin: 'spotify', key: 'lyricOffset' } as const, 0)
 const art = atom({ plugin: 'spotify', key: 'art' } as const, null)
 const IDLE_DJ: SpotifyDj = { status: 'idle', vibe: '', reason: '', picks: [], source: '', at: 0, link: '' }
 const dj = atom({ plugin: 'spotify', key: 'dj' } as const, IDLE_DJ)
-const autopilot = atom({ plugin: 'spotify', key: 'autopilot' } as const, false)
 const recap = atom({ plugin: 'spotify', key: 'recap' } as const, [])
 const premium = atom({ plugin: 'spotify', key: 'premium' } as const, null)
 const busyKeys = atom({ plugin: 'spotify', key: 'busy' } as const, [])
 const flash = atom({ plugin: 'spotify', key: 'flash' } as const, '')
-const GREEN = '#1DB954'
-const FLASH_MS = 12_000
+const settings = atom({ plugin: 'spotify', key: 'settings' } as const, DEFAULT_SETTINGS)
+const settingsGroup = atom({ plugin: 'spotify', key: 'settingsGroup' } as const, 'General')
+const focus = atom({ plugin: 'spotify', key: 'focus' } as const, null)
+const focusLeft = atom({ plugin: 'spotify', key: 'focusLeft' } as const, 0)
+const IDLE_LIBRARY: SpotifyLibrary = { view: 'playlists', status: 'idle', items: [] }
+const library = atom({ plugin: 'spotify', key: 'library' } as const, IDLE_LIBRARY)
 
 const TOOL_NOW = 'mcp__spotify__now_playing'
 const TOOL_CONTROL = 'mcp__spotify__control'
@@ -83,24 +125,42 @@ const TOOL_SEARCH = 'mcp__spotify__search'
 const TOOL_QUEUE = 'mcp__spotify__queue'
 const TOOL_DEVICES = 'mcp__spotify__devices'
 
+/** What the store keeps of a login: the refresh token plain, or DPAPI-encrypted on Windows. */
+type StoredTokens = {
+  access?: string
+  refresh?: string
+  refreshEnc?: string
+  scheme?: 'plain' | 'dpapi'
+  expiresAt: number
+  scope?: string
+}
+
 // Module state: reset on reload, which is fine (tokens live in $.store, the UI's values in $.state).
 let configuredClientId = ''
-let showBand = true
-let notify = true
+let cfg: Settings = DEFAULT_SETTINGS
 let polling = false
+let lastPoll = 0
 let lastTrack = ''
+let trackStartedAt = 0
 let loginRunning = false
 let refreshing: Promise<Tokens> | null = null
+let memAccess: { token: string; expiresAt: number } | null = null
 let lastSecond = -1
+let lastFocusSecond = -1
 let vizEnergy = 0
 let artLoading = ''
 let lyricsLoading = ''
 let djRunning = false
+let djPicks = new Set<string>()
+let lastEventDj = 0
 let turnsSinceDj = 0
 let turnFailures = 0
 let testsFailing = false
 let lastPrompt = ''
-const artCache = new Map<string, { cells: string; palette: number[] }>()
+let lastShared = ''
+let paneColumns = 80
+let noticeSeq = 0
+const artCache = new Map<string, { cells: string; palette: number[]; pixels: string }>()
 const lyricsCache = new Map<string, SpotifyLyrics>()
 
 /** Fire-and-forget: background work reports through `notice`, never as an unhandled rejection. */
@@ -129,7 +189,75 @@ async function flashGreen($: Engine, text: string) {
   $.clock.after(FLASH_MS, () => quiet(update($, flash, f => (f === text ? '' : f))))
 }
 
-// ---------- auth ----------
+/** Sets the pane's status message; it fades after the time the settings give. */
+async function say($: Engine, text: string) {
+  const id = ++noticeSeq
+  await update($, notice, () => text)
+  const ms = noticeMs(cfg)
+  if (ms !== null && text) $.clock.after(ms, () => quiet(clearNotice($, id)))
+}
+
+async function clearNotice($: Engine, id: number) {
+  if (id === noticeSeq) await update($, notice, () => '')
+}
+
+async function isWindows($: Engine): Promise<boolean> {
+  return (await $.env.get('OS')) === 'Windows_NT'
+}
+
+// ---------- settings ----------
+
+async function loadSettings($: Engine) {
+  const stored = await $.store.get('settings')
+  let next = mergeSettings(stored)
+  // 0.2 kept autopilot on its own
+  if (stored === undefined && (await $.store.get('autopilot')) === true) next = { ...next, autopilot: 'on' }
+  cfg = next
+  await update($, settings, () => next)
+}
+
+async function setSetting($: Engine, key: string, raw: string): Promise<string> {
+  const def = findSetting(key)
+  if (!def) return `No setting "${key}". Run /spotify set to list them.`
+  const value = matchOption(def, raw)
+  if (!value) return `"${raw}" is not an option for ${def.label}: ${def.options.map(o => o.label).join(', ')}.`
+  if (def.key === 'autopilot' && value === 'on' && (await read($, premium)) === false) {
+    return `Autopilot queues music: ${PREMIUM_ONLY}`
+  }
+  const before = cfg
+  cfg = { ...cfg, [def.key]: value }
+  await update($, settings, () => cfg)
+  await $.store.set('settings', cfg)
+  if (def.key === 'protectTokens' && before.protectTokens !== value) quiet(resaveTokens($))
+  if (def.key === 'art' && before.art !== value) {
+    const p = await read($, player)
+    if (p) quiet(loadArt($, p.imageUrl))
+  }
+  if (def.key === 'lyrics' && value === 'on') {
+    const p = await read($, player)
+    if (p) quiet(loadLyrics($, p))
+  }
+  return `${def.label}: ${optionLabel(def, value)}.`
+}
+
+async function resetSettings($: Engine): Promise<string> {
+  cfg = DEFAULT_SETTINGS
+  await update($, settings, () => cfg)
+  await $.store.set('settings', cfg)
+  return 'Settings reset to their defaults.'
+}
+
+function settingsText(s: Settings): string {
+  return GROUPS.map(g =>
+    [`${g}:`, ...SETTINGS.filter(d => d.group === g).map(d => `  ${d.key.padEnd(16)} ${optionLabel(d, s[d.key] ?? d.default).padEnd(14)} ${d.help}`)].join('\n'),
+  ).join('\n') + '\n\nChange one with /spotify set <key> <value>, or in the Settings tab (/spotify settings).'
+}
+
+async function showGroup($: Engine, group: string) {
+  await update($, settingsGroup, () => group)
+}
+
+// ---------- tokens ----------
 
 async function clientId($: Engine): Promise<string> {
   if (configuredClientId) return configuredClientId
@@ -142,8 +270,56 @@ async function hasTokens($: Engine): Promise<boolean> {
 }
 
 async function logout($: Engine) {
+  memAccess = null
   await $.store.delete('tokens')
   await $.store.delete('pending')
+}
+
+async function dpapi($: Engine, script: string, input: string): Promise<string | undefined> {
+  try {
+    const { exitCode, stdout } = await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], {
+      stdin: input,
+      timeoutMs: 15_000,
+    })
+    const out = stdout.trim()
+    return exitCode === 0 && out ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Saves a login: with encryption on (Windows), the refresh token is DPAPI-encrypted and the access token kept in memory. */
+async function saveTokens($: Engine, t: Tokens) {
+  memAccess = { token: t.access, expiresAt: t.expiresAt }
+  if (isOn(cfg, 'protectTokens') && (await isWindows($))) {
+    const enc = await dpapi($, DPAPI_PROTECT, t.refresh)
+    if (enc) {
+      const stored: StoredTokens = { refreshEnc: enc, scheme: 'dpapi', expiresAt: t.expiresAt, scope: t.scope }
+      await $.store.set('tokens', stored)
+      return
+    }
+  }
+  const stored: StoredTokens = { access: t.access, refresh: t.refresh, scheme: 'plain', expiresAt: t.expiresAt, scope: t.scope }
+  await $.store.set('tokens', stored)
+}
+
+async function refreshTokenOf($: Engine, stored: StoredTokens): Promise<string> {
+  if (stored.scheme === 'dpapi') {
+    const plain = stored.refreshEnc ? await dpapi($, DPAPI_UNPROTECT, stored.refreshEnc) : undefined
+    if (!plain) throw new SpotifyError('Could not decrypt the saved Spotify login. Run /spotify login.', 401, 'not_logged_in')
+    return plain
+  }
+  return stored.refresh ?? ''
+}
+
+/** Re-saves the login under the current encryption setting. */
+async function resaveTokens($: Engine) {
+  const stored = (await $.store.get('tokens')) as StoredTokens | undefined
+  if (!stored) return
+  const refreshToken = await refreshTokenOf($, stored)
+  const access = memAccess?.token ?? stored.access ?? ''
+  await saveTokens($, { access, refresh: refreshToken, expiresAt: memAccess?.expiresAt ?? stored.expiresAt, scope: stored.scope })
+  await say($, isOn(cfg, 'protectTokens') ? 'Saved login encrypted.' : 'Saved login stored without encryption.')
 }
 
 async function beginLogin($: Engine): Promise<string> {
@@ -177,7 +353,7 @@ async function finishLogin($: Engine, redirect: string): Promise<void> {
     client_id: await clientId($),
     code_verifier: pending.verifier,
   })
-  await $.store.set('tokens', tokens)
+  await saveTokens($, tokens)
   await $.store.delete('pending')
 }
 
@@ -201,14 +377,11 @@ async function tokenRequest($: Engine, form: Record<string, string>, previousRef
   }
 }
 
-async function refreshTokens($: Engine, tokens: Tokens): Promise<Tokens> {
+async function refreshTokens($: Engine, stored: StoredTokens): Promise<Tokens> {
   try {
-    const fresh = await tokenRequest(
-      $,
-      { grant_type: 'refresh_token', refresh_token: tokens.refresh, client_id: await clientId($) },
-      tokens.refresh,
-    )
-    await $.store.set('tokens', fresh)
+    const refreshToken = await refreshTokenOf($, stored)
+    const fresh = await tokenRequest($, { grant_type: 'refresh_token', refresh_token: refreshToken, client_id: await clientId($) }, refreshToken)
+    await saveTokens($, { ...fresh, scope: fresh.scope ?? stored.scope })
     return fresh
   } catch (err) {
     if (err instanceof SpotifyError && err.status === 400) await logout($)
@@ -219,18 +392,20 @@ async function refreshTokens($: Engine, tokens: Tokens): Promise<Tokens> {
 }
 
 async function accessToken($: Engine, force: boolean): Promise<string> {
-  const tokens = (await $.store.get('tokens')) as Tokens | undefined
-  if (!tokens) throw new SpotifyError('Not logged in. Run /spotify login.', 401, 'not_logged_in')
-  if (!force && (await $.clock.now()) < tokens.expiresAt) return tokens.access
-  refreshing ??= refreshTokens($, tokens)
+  const now = await $.clock.now()
+  if (!force && memAccess && now < memAccess.expiresAt) return memAccess.token
+  const stored = (await $.store.get('tokens')) as StoredTokens | undefined
+  if (!stored) throw new SpotifyError('Not logged in. Run /spotify login.', 401, 'not_logged_in')
+  if (!force && stored.access && now < stored.expiresAt) return stored.access
+  refreshing ??= refreshTokens($, stored)
   return (await refreshing).access
 }
 
-// ---------- browser and callback listener ----------
-
-async function isWindows($: Engine): Promise<boolean> {
-  return (await $.env.get('OS')) === 'Windows_NT'
+async function grantedScope($: Engine): Promise<string> {
+  return ((await $.store.get('tokens')) as StoredTokens | undefined)?.scope ?? ''
 }
+
+// ---------- browser and callback listener ----------
 
 async function openBrowser($: Engine, url: string): Promise<boolean> {
   const tries: string[][] = (await isWindows($))
@@ -259,15 +434,11 @@ async function waitForCallback($: Engine): Promise<string | undefined> {
   }
 }
 
-/** "Connected to Spotify as Name (Premium)." — the account the new tokens belong to. */
 async function setPremium($: Engine, value: boolean | null) {
   if ((await read($, premium)) === value) return
   await update($, premium, () => value)
   await $.store.set('premium', value)
-  if (value === false && (await read($, autopilot))) {
-    await update($, autopilot, () => false)
-    await $.store.set('autopilot', false)
-  }
+  if (value === false && isOn(cfg, 'autopilot')) await setSetting($, 'autopilot', 'off')
 }
 
 /** Reads the account's plan from /me (needs user-read-private; unknown without it). */
@@ -278,6 +449,7 @@ async function detectPlan($: Engine): Promise<any> {
   return me
 }
 
+/** "✓ Connected to Spotify as Name (Premium)." — the account the new tokens belong to. */
 async function connectedMessage($: Engine): Promise<string> {
   try {
     const me = await detectPlan($)
@@ -289,13 +461,13 @@ async function connectedMessage($: Engine): Promise<string> {
   }
 }
 
-/** Tells the person the login worked: a transcript line that stays, a toast, and the pane's notice. */
+/** Tells the person the login worked: green above the prompt, a toast, and the pane's notice. */
 async function announceConnected($: Engine): Promise<string> {
   const text = await connectedMessage($)
   const hint = (await read($, player)) ? '' : ' Play something, then try /spotify.'
   await flashGreen($, text + hint)
   $.ui.toast(text, { timeoutMs: 8000 })
-  await update($, notice, () => text)
+  await say($, text)
   return text + hint
 }
 
@@ -309,7 +481,7 @@ async function listenForLogin($: Engine) {
     await refresh($, true)
     await announceConnected($)
   } catch (err) {
-    await update($, notice, () => errText(err))
+    await say($, errText(err))
     $.ui.toast(`Spotify login failed: ${errText(err)}`)
   } finally {
     loginRunning = false
@@ -383,7 +555,7 @@ async function getDevices($: Engine): Promise<SpotifyDevice[]> {
   const data = await api($, 'GET', '/me/player/devices')
   return (data?.devices ?? []).map((d: any) => ({
     id: d.id,
-    name: d.name,
+    name: clean(d.name),
     type: d.type,
     isActive: Boolean(d.is_active),
     volume: d.volume_percent ?? null,
@@ -440,6 +612,7 @@ async function playItem($: Engine, item: Pick<SpotifyItem, 'uri' | 'kind'>): Pro
 async function refresh($: Engine, deep: boolean): Promise<SpotifyPlayer | null> {
   if (polling && !deep) return read($, player)
   polling = true
+  lastPoll = await $.clock.now()
   try {
     if (!(await hasTokens($))) {
       await update($, authed, () => false)
@@ -458,22 +631,35 @@ async function refresh($: Engine, deep: boolean): Promise<SpotifyPlayer | null> 
       const queue = await getUpNext($, 5).catch(() => [] as SpotifyItem[])
       await update($, upNext, () => queue)
     }
-    if (changed && now) quiet(onTrackChange($, now))
-    if (changed && notify && now?.isPlaying && prev !== null) $.ui.toast(`♫ ${now.title} — ${now.artists}`)
+    if (changed && now) quiet(onTrackChange($, now, prev))
+    if (changed && isOn(cfg, 'trackToasts') && now?.isPlaying && prev !== null) $.ui.toast(`♫ ${now.title} — ${now.artists}`)
     $.ui.status(now ? `${now.isPlaying ? '♫' : '⏸'} ${now.title} — ${now.artists}` : undefined)
     return now
   } catch (err) {
     if (err instanceof SpotifyError && err.reason === 'not_logged_in') await update($, authed, () => false)
-    await update($, notice, () => errText(err))
+    await say($, errText(err))
     return read($, player)
   } finally {
     polling = false
   }
 }
 
-async function onTrackChange($: Engine, p: SpotifyPlayer) {
-  await update($, lyricIndex, () => -1)
+/** Once a second: polls when the refresh setting says it is time. */
+async function pollTick($: Engine) {
+  const p = await read($, player)
+  const state = p ? { isPlaying: p.isPlaying, remainingMs: p.durationMs - (await positionNow($, p)) } : null
+  if ((await $.clock.now()) - lastPoll >= pollDelay(cfg.polling ?? 'smart', state)) await refresh($, false)
+}
+
+async function onTrackChange($: Engine, p: SpotifyPlayer, prev: SpotifyPlayer | null) {
   const at = await $.clock.now()
+  if (prev && djPicks.has(prev.uri) && isOn(cfg, 'djLearns') && at - trackStartedAt < SKIP_MS && trackStartedAt > 0) {
+    await noteTaste($, 'skipped', `${prev.title} — ${prev.artists}`)
+  }
+  trackStartedAt = at
+  await update($, lyricIndex, () => -1)
+  const offsets = ((await $.store.get('lyricOffsets')) ?? {}) as Record<string, number>
+  await update($, lyricOffset, () => offsets[p.id] ?? 0)
   await update($, recap, list => {
     if (list[list.length - 1]?.uri === p.uri) return list
     const entry: RecapEntry = { at, uri: p.uri, title: p.title, artists: p.artists, tools: 0, failures: 0, files: [], moments: [] }
@@ -488,8 +674,9 @@ async function positionNow($: Engine, p: SpotifyPlayer): Promise<number> {
   return Math.min(p.durationMs, p.progressMs + ((await $.clock.now()) - p.fetchedAt))
 }
 
-/** Four times a second: moves the pane's clock and the current lyric line. */
+/** Four times a second: the pane's clock, the lyric line, and the focus timer. */
 async function tick($: Engine) {
+  await focusTick($)
   const p = await read($, player)
   if (!p) return
   const at = await positionNow($, p)
@@ -502,21 +689,22 @@ async function tick($: Engine) {
   }
   const l = await read($, lyrics)
   if (l?.trackId === p.id && l.status === 'synced') {
-    const idx = lyricIndexAt(l.lines, at + 300)
+    const idx = lyricIndexAt(l.lines, at + 300 + (await read($, lyricOffset)))
     if (idx !== (await read($, lyricIndex))) await update($, lyricIndex, () => idx)
   }
 }
 
-/** Ten times a second while the player tab shows: repaints the spectrum in place. */
+/** Ten times a second while the player tab shows: repaints the terminal spectrum in place. */
 async function vizFrame($: Engine) {
-  if (!(await read($, paneOpen)) || (await read($, tab)) !== 'player') return
+  if (!isOn(cfg, 'visualizer') || !(await read($, paneOpen)) || (await read($, tab)) !== 'player') return
   const p = await read($, player)
   if (!p) return
   const target = p.isPlaying ? 1 : 0
   if (vizEnergy === 0 && target === 0) return
   vizEnergy = target > vizEnergy ? Math.min(1, vizEnergy + 0.2) : Math.max(0, vizEnergy - 0.1)
   const a = await read($, art)
-  const cells = vizCells(VIZ_COLUMNS, VIZ_ROWS, await positionNow($, p), p.id, a?.palette ?? [], vizEnergy)
+  const columns = Math.min(VIZ_COLUMNS, paneColumns)
+  const cells = vizCells(columns, VIZ_ROWS, await positionNow($, p), p.id, a?.palette ?? [], vizEnergy)
   try {
     await $.ui.blit({ requestId: PANE, key: 'viz', cells })
   } catch {}
@@ -526,7 +714,7 @@ async function vizFrame($: Engine) {
 
 async function lrclib($: Engine, path: string): Promise<any> {
   const res = await $.http.fetch(`https://lrclib.net/api/${path}`, {
-    headers: { 'User-Agent': 'claude-code-spotify-mod/0.2 (https://github.com/anthropics/claude-code)' },
+    headers: { 'User-Agent': 'claude-code-spotify-mod/0.3 (https://github.com/jewdev/claude-spotify-mod)' },
   })
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`LRCLIB ${res.status}`)
@@ -534,6 +722,7 @@ async function lrclib($: Engine, path: string): Promise<any> {
 }
 
 async function loadLyrics($: Engine, p: SpotifyPlayer) {
+  if (!isOn(cfg, 'lyrics')) return
   if (p.kind !== 'track') {
     await update($, lyrics, (): SpotifyLyrics => ({ trackId: p.id, status: 'missing', lines: [] }))
     return
@@ -582,29 +771,43 @@ async function currentLyric($: Engine): Promise<string | undefined> {
   return l?.status === 'synced' && idx >= 0 ? l.lines[idx]?.text || undefined : undefined
 }
 
+/** Moves the current track's lyrics earlier or later; remembered per track. */
+async function nudgeLyrics($: Engine, deltaMs: number | null): Promise<string> {
+  const p = await read($, player)
+  if (!p) return 'Nothing is playing.'
+  const next = deltaMs === null ? 0 : Math.max(-10_000, Math.min(10_000, (await read($, lyricOffset)) + deltaMs))
+  await update($, lyricOffset, () => next)
+  const offsets = ((await $.store.get('lyricOffsets')) ?? {}) as Record<string, number>
+  const kept = Object.entries({ ...offsets, [p.id]: next }).filter(([, v]) => v !== 0).slice(-200)
+  await $.store.set('lyricOffsets', Object.fromEntries(kept))
+  return next === 0 ? 'Lyrics timing reset.' : `Lyrics ${next > 0 ? 'earlier' : 'later'} by ${Math.abs(next) / 1000}s.`
+}
+
 // ---------- album art ----------
 
 async function loadArt($: Engine, url: string) {
-  if (!url) {
+  const size = artPixels(cfg)
+  if (!url || size === 0) {
     await update($, art, () => null)
     return
   }
-  const cached = artCache.get(url)
+  const key = `${url}@${size}`
+  const cached = artCache.get(key)
   if (cached) {
-    await update($, art, () => ({ url, columns: ART_SIZE, rows: ART_SIZE / 2, ...cached }))
+    await update($, art, () => ({ url, size, columns: size, rows: size / 2, ...cached }))
     return
   }
-  if (artLoading === url || !isSafeImageUrl(url) || !(await isWindows($))) return
-  artLoading = url
+  if (artLoading === key || !isSafeImageUrl(url) || !(await isWindows($))) return
+  artLoading = key
   try {
-    const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', artScript(url, ART_SIZE)]
+    const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', artScript(url, size)]
     const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 20_000 })
     const hex = stdout.trim()
-    if (exitCode !== 0 || hex.length !== ART_SIZE * ART_SIZE * 6) return
-    const drawn = { cells: artCells(hex, ART_SIZE, ART_SIZE), palette: paletteFrom(hex) }
-    artCache.set(url, drawn)
+    if (exitCode !== 0 || hex.length !== size * size * 6) return
+    const drawn = { cells: artCells(hex, size, size), palette: paletteFrom(hex), pixels: hex }
+    artCache.set(key, drawn)
     if ((await read($, player))?.imageUrl === url) {
-      await update($, art, () => ({ url, columns: ART_SIZE, rows: ART_SIZE / 2, ...drawn }))
+      await update($, art, () => ({ url, size, columns: size, rows: size / 2, ...drawn }))
     }
   } catch {
   } finally {
@@ -617,13 +820,13 @@ async function loadArt($: Engine, url: string) {
 async function act($: Engine, done: string, fn: () => Promise<unknown>): Promise<string> {
   try {
     await fn()
-    await update($, notice, () => done)
-    await $.clock.sleep(350)
-    await refresh($, true)
+    await say($, done)
+    // give Spotify a moment to apply it; a timer so it also works from background work
+    $.clock.after(350, () => quiet(refresh($, true)))
     return done
   } catch (err) {
     const text = errText(err)
-    await update($, notice, () => text)
+    await say($, text)
     return text
   }
 }
@@ -664,8 +867,8 @@ async function seekTo($: Engine, ms: number) {
   return act($, `Seeked to ${clock(at)}.`, () => playerCall($, 'PUT', `/me/player/seek?position_ms=${at}`))
 }
 
-async function setShuffle($: Engine, on: boolean) {
-  return act($, `Shuffle ${on ? 'on' : 'off'}.`, () => playerCall($, 'PUT', `/me/player/shuffle?state=${on}`))
+async function setShuffle($: Engine, enabled: boolean) {
+  return act($, `Shuffle ${enabled ? 'on' : 'off'}.`, () => playerCall($, 'PUT', `/me/player/shuffle?state=${enabled}`))
 }
 
 async function toggleShuffle($: Engine) {
@@ -686,6 +889,7 @@ async function like($: Engine, liked: boolean | undefined) {
   const p = await refresh($, true)
   if (!p) return 'Nothing is playing.'
   const want = liked ?? !p.liked
+  if (want && djPicks.has(p.uri) && isOn(cfg, 'djLearns')) await noteTaste($, 'liked', `${p.title} — ${p.artists}`)
   return act($, want ? `Saved "${p.title}" to Liked Songs.` : `Removed "${p.title}" from Liked Songs.`, async () => {
     await setLiked($, p.uri, want)
     lastTrack = ''
@@ -697,7 +901,7 @@ async function openInSpotify($: Engine, item: SpotifyItem): Promise<string> {
   const text = opened
     ? `Opened ${item.kind} "${item.title}" in Spotify. A free account can't start playback from here.`
     : `Open ${item.kind} "${item.title}" in Spotify: ${webUrl(item.uri)}`
-  await update($, notice, () => text)
+  await say($, text)
   return text
 }
 
@@ -731,16 +935,16 @@ async function queueQuery($: Engine, raw: string) {
 }
 
 async function runSearch($: Engine, raw: string): Promise<SpotifyItem[]> {
-  await update($, notice, () => `Searching for "${raw.trim()}"…`)
+  await say($, `Searching for "${raw.trim()}"…`)
   try {
     const { query, kind, explicit } = parseQuery(raw)
     const kinds: SearchKind[] = explicit ? [kind] : ['track', 'album', 'playlist']
     const found = await search($, query, kinds, explicit ? 8 : 4)
     await update($, results, () => found)
-    await update($, notice, () => (found.length ? `${found.length} results for "${query}".` : `No results for "${query}".`))
+    await say($, found.length ? `${found.length} results for "${query}".` : `No results for "${query}".`)
     return found
   } catch (err) {
-    await update($, notice, () => errText(err))
+    await say($, errText(err))
     return []
   }
 }
@@ -751,7 +955,7 @@ async function loadDevices($: Engine): Promise<SpotifyDevice[]> {
     await update($, devices, () => list)
     return list
   } catch (err) {
-    await update($, notice, () => errText(err))
+    await say($, errText(err))
     return []
   }
 }
@@ -773,15 +977,17 @@ async function openPane($: Engine, which: SpotifyTab | undefined) {
   await update($, paneOpen, () => true)
   quiet(loadDevices($))
   quiet(refresh($, true))
+  if (which === 'library') quiet(loadLibrary($, undefined))
 }
 
 async function showTab($: Engine, which: SpotifyTab) {
   await update($, tab, () => which)
+  if (which === 'library' && (await read($, library)).status === 'idle') quiet(loadLibrary($, undefined))
 }
 
 async function pressLogin($: Engine) {
   const text = await login($)
-  await update($, notice, () => text.split('\n')[0] ?? '')
+  await say($, text.split('\n')[0] ?? '')
 }
 
 async function pressLogout($: Engine) {
@@ -789,7 +995,110 @@ async function pressLogout($: Engine) {
   await refresh($, true)
 }
 
+// ---------- cues: when Claude finishes, or needs you (sounds only: the music is left alone) ----------
+
+async function chime($: Engine, kind: 'done' | 'waiting') {
+  if (await isWindows($)) {
+    try {
+      await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', chimeScript(kind)], { timeoutMs: 5000 })
+    } catch {}
+    return
+  }
+  try {
+    await $.audio.play({ asset: 'assets/chime.wav' })
+  } catch {}
+}
+
+async function doneCue($: Engine) {
+  if (cfg.doneCue === 'chime') await chime($, 'done')
+}
+
+async function waitingCue($: Engine) {
+  if (cfg.waitingCue === 'chime') await chime($, 'waiting')
+}
+
+// ---------- focus timer ----------
+
+async function startFocus($: Engine, minutesArg: number | undefined): Promise<string> {
+  const minutes = minutesArg ?? Number(cfg.focusLength ?? 25)
+  const endsAt = (await $.clock.now()) + minutes * 60_000
+  const block: SpotifyFocus = { phase: 'focus', endsAt, minutes }
+  await update($, focus, () => block)
+  lastFocusSecond = -1
+  return `Focus: ${minutes} minutes${Number(cfg.breakLength) > 0 ? `, then a ${cfg.breakLength}-minute break` : ''}. /spotify focus stop ends it.`
+}
+
+async function stopFocus($: Engine): Promise<string> {
+  const f = await read($, focus)
+  await update($, focus, () => null)
+  return f ? 'Focus timer stopped.' : 'No focus timer is running.'
+}
+
+async function focusTick($: Engine) {
+  const f = await read($, focus)
+  if (!f) return
+  const left = f.endsAt - (await $.clock.now())
+  const second = Math.max(0, Math.ceil(left / 1000))
+  if (second !== lastFocusSecond) {
+    lastFocusSecond = second
+    await update($, focusLeft, () => second)
+  }
+  if (left > 0) return
+  if (f.phase === 'focus') {
+    const breakMin = Number(cfg.breakLength ?? 0)
+    quiet(chime($, 'done'))
+    if (breakMin > 0) {
+      const breakBlock: SpotifyFocus = { phase: 'break', endsAt: (await $.clock.now()) + breakMin * 60_000, minutes: breakMin }
+      await update($, focus, () => breakBlock)
+      await flashGreen($, `✓ ${f.minutes} minutes of focus done. Take ${breakMin}: stand up, stretch, drink water.`)
+    } else {
+      await update($, focus, () => null)
+      await flashGreen($, `✓ ${f.minutes} minutes of focus done.`)
+    }
+    return
+  }
+  await update($, focus, () => null)
+  quiet(chime($, 'waiting'))
+  await flashGreen($, '✓ Break over. /spotify focus starts another block.')
+}
+
+// ---------- library ----------
+
+async function loadLibrary($: Engine, view: LibraryView | undefined) {
+  const which = view ?? (await read($, library)).view
+  await update($, library, (): SpotifyLibrary => ({ view: which, status: 'loading', items: [] }))
+  try {
+    let items: SpotifyItem[] = []
+    if (which === 'playlists') {
+      const data = await api($, 'GET', '/me/playlists?limit=30')
+      items = (data?.items ?? []).filter(Boolean).map(toItem)
+    } else if (which === 'liked') {
+      const data = await api($, 'GET', '/me/tracks?limit=30')
+      items = (data?.items ?? []).map((x: any) => x?.track).filter(Boolean).map(toItem)
+    } else {
+      const data = await api($, 'GET', '/me/player/recently-played?limit=30')
+      const seen = new Set<string>()
+      for (const x of data?.items ?? []) {
+        const t = x?.track
+        if (t && !seen.has(t.uri)) {
+          seen.add(t.uri)
+          items.push(toItem(t))
+        }
+      }
+    }
+    await update($, library, (): SpotifyLibrary => ({ view: which, status: 'done', items }))
+  } catch (err) {
+    await update($, library, (): SpotifyLibrary => ({ view: which, status: 'error', items: [] }))
+    await say($, errText(err))
+  }
+}
+
 // ---------- DJ ----------
+
+async function noteTaste($: Engine, kind: 'liked' | 'skipped', label: string) {
+  const taste = ((await $.store.get('taste')) as Taste | undefined) ?? EMPTY_TASTE
+  await $.store.set('taste', rememberTaste(taste, kind, label))
+}
 
 /** What the session has been doing lately, for the autopilot's cheap model call. */
 async function activitySummary($: Engine): Promise<string> {
@@ -806,18 +1115,19 @@ async function activitySummary($: Engine): Promise<string> {
 }
 
 async function askDj($: Engine, source: SpotifyDj['source'], hint: string, count: number): Promise<string> {
-  const ask = `${DJ_INSTRUCTIONS}\nPick ${count} tracks.${hint ? ` The user adds: "${hint}".` : ''}`
+  const taste = isOn(cfg, 'djLearns') ? tasteNote(((await $.store.get('taste')) as Taste | undefined) ?? EMPTY_TASTE) : ''
+  const extra = `${hint ? ` The user adds: "${hint}".` : ''}${taste ? ` ${taste}` : ''}`
   if (source !== 'autopilot') {
     const forked = await $.model.fork({
-      prompt: `${ask}\nBase the pick on what we have been working on in this conversation. Answer with the JSON only.`,
+      prompt: `${DJ_INSTRUCTIONS}\nPick ${count} tracks.${extra}\nBase the pick on what we have been working on in this conversation. Answer with the JSON only.`,
     })
     if (forked.isAnswered) return forked.text
   }
   const r = await $.model.complete({
     model: 'haiku',
     system: DJ_INSTRUCTIONS,
-    prompt: `${await activitySummary($)}\n\nPick ${count} tracks.${hint ? ` The user adds: "${hint}".` : ''}`,
-    maxTokens: 700,
+    prompt: `${await activitySummary($)}\n\nPick ${count} tracks.${extra}`,
+    maxTokens: 900,
     timeoutMs: 45_000,
   })
   if (!r.isAnswered) throw new Error(`The DJ could not answer (${r.reason}).`)
@@ -828,7 +1138,7 @@ async function runDj($: Engine, source: SpotifyDj['source'], hint: string) {
   if (djRunning) return
   djRunning = true
   turnsSinceDj = 0
-  const count = source === 'autopilot' ? 3 : 6
+  const count = source === 'autopilot' ? 3 : Number(cfg.djCount ?? 6)
   await update($, dj, (d): SpotifyDj => ({ ...d, status: 'thinking', source }))
   try {
     const plan = parseDjPlan(await askDj($, source, hint, count))
@@ -838,13 +1148,14 @@ async function runDj($: Engine, source: SpotifyDj['source'], hint: string) {
     )
     const picks = hits.filter((x): x is SpotifyItem => x !== undefined)
     if (picks.length === 0) throw new Error('None of the DJ picks were found on Spotify.')
+    picks.forEach(x => djPicks.add(x.uri))
     const at = await $.clock.now()
     if ((await read($, premium)) === false) {
       const link = await djPlaylist($, plan.vibe, plan.reason, picks)
       await update($, dj, () => ({ status: 'done', vibe: plan.vibe, reason: plan.reason, picks, source, at, link }))
       const text = link ? `DJ · ${plan.vibe}: saved ${picks.length} tracks as a playlist and opened it.` : `DJ · ${plan.vibe}: ${picks.length} picks. ${RELOGIN}`
       $.ui.toast(text, { timeoutMs: 8000 })
-      await update($, notice, () => text)
+      await say($, text)
       return
     }
     const p = await read($, player)
@@ -856,7 +1167,7 @@ async function runDj($: Engine, source: SpotifyDj['source'], hint: string) {
     await update($, dj, () => ({ status: 'done', vibe: plan.vibe, reason: plan.reason, picks, source, at, link: '' }))
     const verb = !p?.isPlaying && source !== 'autopilot' ? 'playing' : 'queued'
     $.ui.toast(`DJ · ${plan.vibe}: ${picks.length} tracks ${verb}`)
-    await update($, notice, () => `DJ ${verb} ${picks.length} tracks: ${plan.vibe}.`)
+    await say($, `DJ ${verb} ${picks.length} tracks: ${plan.vibe}.`)
     await refresh($, true)
   } catch (err) {
     await update($, dj, (d): SpotifyDj => ({ ...d, status: 'error', reason: errText(err) }))
@@ -865,13 +1176,14 @@ async function runDj($: Engine, source: SpotifyDj['source'], hint: string) {
   }
 }
 
-async function setAutopilot($: Engine, on: boolean | undefined) {
-  if ((await read($, premium)) === false && on !== false) return `Autopilot queues music, which ${PREMIUM_ONLY.charAt(0).toLowerCase()}${PREMIUM_ONLY.slice(1)}`
-  const next = await update($, autopilot, a => on ?? !a)
-  await $.store.set('autopilot', next)
-  return next
-    ? 'DJ autopilot on: every few turns, or when things go sideways, the DJ queues music for the moment.'
-    : 'DJ autopilot off.'
+/** Autopilot, steered by what just happened: failing tests calm it, green tests lift it. */
+async function djOnEvent($: Engine, hint: string) {
+  if (!isOn(cfg, 'autopilot') || !isOn(cfg, 'djEvents') || djRunning) return
+  if ((await read($, premium)) === false) return
+  const now = await $.clock.now()
+  if (now - lastEventDj < EVENT_DJ_GAP_MS) return
+  lastEventDj = now
+  await runDj($, 'autopilot', hint)
 }
 
 // ---------- recap ----------
@@ -888,8 +1200,8 @@ async function noteActivity($: Engine, file: string | undefined, failed: boolean
 
 const RELOGIN = 'Spotify needs playlist permission first: run /spotify login once more, approve, then save again.'
 
-function hasPlaylistScope(tokens: Tokens | undefined): boolean {
-  return tokens?.scope?.includes('playlist-modify') === true
+function hasPlaylistScope(scope: string): boolean {
+  return scope.includes('playlist-modify')
 }
 
 /** Creates a private playlist of `uris`; resolves its link. */
@@ -916,7 +1228,7 @@ async function createPlaylist($: Engine, title: string, description: string, uri
 
 /** A free account's DJ set: saved as a playlist and opened; '' when that is not allowed. */
 async function djPlaylist($: Engine, vibe: string, reason: string, picks: SpotifyItem[]): Promise<string> {
-  if (!hasPlaylistScope((await $.store.get('tokens')) as Tokens | undefined)) return ''
+  if (!hasPlaylistScope(await grantedScope($))) return ''
   try {
     const link = await createPlaylist($, `Claude DJ · ${vibe}`, reason.slice(0, 280), picks.map(x => x.uri))
     await openBrowser($, link)
@@ -927,8 +1239,7 @@ async function djPlaylist($: Engine, vibe: string, reason: string, picks: Spotif
 }
 
 async function savePlaylist($: Engine, name: string): Promise<string> {
-  const tokens = (await $.store.get('tokens')) as Tokens | undefined
-  if (!hasPlaylistScope(tokens)) return RELOGIN
+  if (!hasPlaylistScope(await grantedScope($))) return RELOGIN
   const entries = await read($, recap)
   const uris = [...new Set(entries.map(e => e.uri).filter(u => u.startsWith('spotify:track:')))]
   if (uris.length === 0) return 'Nothing to save yet: no tracks have played this session.'
@@ -937,7 +1248,7 @@ async function savePlaylist($: Engine, name: string): Promise<string> {
   const description = `Soundtrack of a Claude Code session: ${entries.length} tracks.`
   try {
     const link = await createPlaylist($, title, description, uris)
-    return `Saved "${title}" with ${uris.length} tracks. ${link}`
+    return `✓ Saved "${title}" with ${uris.length} tracks. ${link}`
   } catch (err) {
     if (err instanceof SpotifyError && (err.status === 403 || err.status === 401)) {
       return `${RELOGIN} (Spotify said: ${err.message})`
@@ -959,10 +1270,37 @@ async function playRecap($: Engine): Promise<string> {
 }
 
 async function pressSave($: Engine) {
-  await update($, notice, () => 'Saving the session as a playlist…')
+  await say($, 'Saving the session as a playlist…')
   const text = await savePlaylist($, '')
-  await update($, notice, () => text)
+  await say($, text)
   $.ui.toast(text, { timeoutMs: 8000 })
+}
+
+async function copyCard($: Engine, surface: Parameters<Engine['ui']['copy']>[0]['surface']) {
+  const text = recapCard(await read($, recap), await $.clock.now())
+  const { isCopied } = await $.ui.copy({ text, surface })
+  await say($, isCopied ? '✓ Session summary copied to the clipboard.' : 'Could not reach the clipboard here; /spotify recap shows the summary.')
+}
+
+async function recapWithStats($: Engine): Promise<string> {
+  const entries = await read($, recap)
+  if (entries.length === 0) return recapText(entries)
+  return `${recapCard(entries, await $.clock.now())}\n\n${recapText(entries)}`
+}
+
+// ---------- Claude awareness ----------
+
+async function shareNowPlaying($: Engine) {
+  if (!isOn(cfg, 'shareNowPlaying')) return
+  const p = await read($, player)
+  if (!p?.isPlaying || p.id === lastShared) return
+  lastShared = p.id
+  await $.session.append({
+    message: {
+      type: 'user',
+      content: [{ type: 'text', text: `(From the user's Spotify mod: they are listening to "${p.title}" by ${p.artists}.)` }],
+    },
+  })
 }
 
 // ---------- tools for Claude ----------
@@ -1090,6 +1428,7 @@ async function listDevices($: Engine): Promise<string> {
 }
 
 async function lyricsText($: Engine): Promise<string> {
+  if (!isOn(cfg, 'lyrics')) return 'Lyrics are off. Turn them on with /spotify set lyrics on.'
   const p = await refresh($, true)
   if (!p) return 'Nothing is playing.'
   const l = await read($, lyrics)
@@ -1177,21 +1516,24 @@ async function runCommand($: Engine, args: string): Promise<string> {
       return `${await listDevices($)}\n\nSwitch with /spotify device <name>.`
     case 'device':
       return arg ? useDevice($, arg) : 'Usage: /spotify device <name>'
-    case 'band': {
-      const hidden = await update($, bandHidden, h => !h)
-      return hidden ? 'Band hidden.' : 'Band shown.'
-    }
+    case 'band':
+      return setSetting($, 'band', isOn(cfg, 'band') ? 'off' : 'on')
     case 'lyrics':
-    case 'lyric':
+    case 'lyric': {
+      if (/^(earlier|later|reset|[+-]\d+(\.\d+)?)$/i.test(arg)) {
+        const delta = /^reset$/i.test(arg) ? null : /^earlier$/i.test(arg) ? 500 : /^later$/i.test(arg) ? -500 : Number(arg) * 1000
+        return nudgeLyrics($, delta)
+      }
       await openPane($, 'lyrics')
       return lyricsText($)
+    }
     case 'dj':
       if (djRunning) return 'The DJ is already picking.'
       quiet(runDj($, arg ? 'hint' : 'session', arg))
       await openPane($, 'dj')
       return 'The DJ is reading the session and picking tracks…'
     case 'autopilot':
-      return setAutopilot($, arg === 'on' ? true : arg === 'off' ? false : undefined)
+      return setSetting($, 'autopilot', arg === 'on' || arg === 'off' ? arg : isOn(cfg, 'autopilot') ? 'off' : 'on')
     case 'recap': {
       if (/^save\b/i.test(arg)) return savePlaylist($, arg.replace(/^save\s*/i, ''))
       const playArg = /^play(?:\s+(\d+))?$/i.exec(arg)
@@ -1201,7 +1543,31 @@ async function runCommand($: Engine, args: string): Promise<string> {
         return entry ? playPick($, recapItem(entry)) : `No track #${playArg[1]} in this session's recap.`
       }
       await openPane($, 'recap')
-      return recapText(await read($, recap))
+      return recapWithStats($)
+    }
+    case 'library':
+    case 'lib':
+      await openPane($, 'library')
+      return 'Your library is in the pane.'
+    case 'focus': {
+      if (/^(stop|off|end)$/i.test(arg)) return stopFocus($)
+      const f = await read($, focus)
+      if (/^status$/i.test(arg) || (!arg && f)) {
+        return f ? `${f.phase === 'focus' ? 'Focus' : 'Break'}: ${clockLeft(f.endsAt - (await $.clock.now()))} left.` : 'No focus timer is running.'
+      }
+      const minutes = arg ? Number(arg) : undefined
+      if (minutes !== undefined && (!Number.isFinite(minutes) || minutes <= 0 || minutes > 240)) return 'Usage: /spotify focus [minutes|stop|status]'
+      return startFocus($, minutes)
+    }
+    case 'settings':
+    case 'config':
+      await openPane($, 'settings')
+      return settingsText(cfg)
+    case 'set': {
+      if (!arg) return settingsText(cfg)
+      if (/^reset$/i.test(arg)) return resetSettings($)
+      const [key = '', ...value] = arg.split(/\s+/)
+      return setSetting($, key, value.join(' '))
     }
     default:
       return `Unknown subcommand "${head}".\n\n${USAGE}`
@@ -1212,24 +1578,22 @@ async function runCommand($: Engine, args: string): Promise<string> {
 
 export const register: Register = (on, options) => {
   configuredClientId = String(options.clientId ?? '').trim()
-  showBand = options.showBand !== false
-  notify = options.notify !== false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    await loadSettings($)
     await $.command.register({
       name: 'spotify',
-      description: 'Spotify: player, lyrics, Claude DJ, session recap, and playback controls',
-      argumentHint: '[play <q>|pause|next|lyrics|dj [hint]|autopilot|recap|queue <q>|search <q>|help]',
+      description: 'Spotify: player, lyrics, Claude DJ, focus timer, recap, library and settings',
+      argumentHint: '[play <q>|pause|next|lyrics|dj [hint]|focus [min]|recap|library|settings|help]',
       immediate: true,
     })
     await registerTools($)
-    if ((await $.store.get('autopilot')) === true) await update($, autopilot, () => true)
     const plan = await $.store.get('premium')
     if (typeof plan === 'boolean') await update($, premium, () => plan)
     if (await hasTokens($)) quiet(detectPlan($))
     quiet(refresh($, true))
-    $.clock.every(POLL_MS, () => quiet(refresh($, false)))
+    $.clock.every(1000, () => quiet(pollTick($)))
     $.clock.every(TICK_MS, () => quiet(tick($)))
     $.clock.every(VIZ_MS, () => quiet(vizFrame($)))
     return started
@@ -1242,7 +1606,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // The session's mood, for the recap and the DJ autopilot
+  on('prompt.submit', async ($, e, next) => {
+    await shareNowPlaying($).catch(() => {})
+    return next(e)
+  })
+
+  // The session's mood, for the recap, the DJ and the cues
   on('turn.start', async ($, e, next) => {
     if (e.text) lastPrompt = e.text
     turnFailures = 0
@@ -1252,17 +1621,25 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     if (e.agentId) return done
+    if (!e.isAborted && e.durationMs >= Number(cfg.doneAfter ?? 60) * 1000) quiet(doneCue($))
     turnsSinceDj += 1
     const due = turnsSinceDj >= 4 || turnFailures >= 3
     const p = await read($, player)
     const free = (await read($, premium)) === false
-    if (due && !free && p?.isPlaying && !djRunning && (await read($, autopilot))) quiet(runDj($, 'autopilot', ''))
+    if (due && !free && p?.isPlaying && !djRunning && isOn(cfg, 'autopilot')) quiet(runDj($, 'autopilot', ''))
     return done
   })
 
+  // A permission prompt: Claude is waiting on the person
+  on('classic.Notification', async ($, e, next) => {
+    if (e.notification_type === 'permission_prompt') quiet(waitingCue($))
+    return next(e)
+  })
+
   on('tool.call', async ($, e, next) => {
-    const ran = await next(e)
     const name = String(e.tool)
+    if (name === 'AskUserQuestion') quiet(waitingCue($))
+    const ran = await next(e)
     if (name.startsWith('mcp__spotify__')) return ran
     const failed = 'isError' in ran && ran.isError === true
     if (failed) turnFailures += 1
@@ -1271,12 +1648,16 @@ export const register: Register = (on, options) => {
     let moment: string | undefined
     if (name === 'Bash' && input.command && isTestCommand(input.command)) {
       if (failed) {
-        if (!testsFailing) moment = 'tests failed ✗'
+        if (!testsFailing) {
+          moment = 'tests failed ✗'
+          quiet(djOnEvent($, 'Tests just started failing: steady, calm, focused music to debug to.'))
+        }
         testsFailing = true
       } else if (testsFailing) {
         testsFailing = false
         moment = 'tests green ✓'
         $.ui.toast('Tests green ✓')
+        quiet(djOnEvent($, 'Tests just went green: something upbeat and celebratory.'))
       }
     }
     await noteActivity($, file, failed, moment)
@@ -1322,22 +1703,17 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // Now-playing band above the prompt, with the line being sung
+  // Above the prompt: a green success line, the focus countdown, and the now-playing band
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    const s = await read($, settings)
     const shout = await read($, flash)
-    const player0 = showBand && !(await read($, bandHidden)) ? await read($, player) : null
-    if (!player0 && !shout) return next(e)
+    const f = await read($, focus)
+    const left = f ? await read($, focusLeft) : 0
+    const p = isOn(s, 'band') ? await read($, player) : null
+    if (!p && !shout && !f) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
-    if (!player0) {
-      return (
-        <Text color={GREEN} bold wrap="wrap">
-          {shout}
-        </Text>
-      )
-    }
-    const p = player0
-    const line = await currentLyric($)
+    const line = p && isOn(s, 'bandLyrics') ? await currentLyric($) : undefined
     const canControl = (await read($, premium)) !== false
     const busy = await read($, busyKeys)
 
@@ -1348,23 +1724,33 @@ export const register: Register = (on, options) => {
             {shout}
           </Text>
         )}
-        <Box flexDirection="row" gap={1}>
-          <Text color="#1DB954">{p.isPlaying ? '♫' : '⏸'}</Text>
-          <Box flexShrink={1}>
-            <Text wrap="truncate-end">
-              <Text bold>{p.title}</Text>
-              <Text dimColor> — {p.artists}</Text>
+        {f && (
+          <Box flexDirection="row" gap={1}>
+            <Text color={f.phase === 'focus' ? GREEN : 'yellow'} bold>
+              {f.phase === 'focus' ? '◎ Focus' : '☕ Break'} {clockLeft(left * 1000)}
             </Text>
+            <Button key="focus-stop" label="stop" plain dimColor onPress={() => quiet(stopFocus($))} />
           </Box>
-          {e.props.bodyColumns > 70 && <Text dimColor>{clock(p.progressMs)}/{clock(p.durationMs)}</Text>}
-          {canControl && <Button key="band-prev" label={busyText(busy, 'band-prev', '⏮', '…')} plain onPress={() => quiet(withBusy($, 'band-prev', () => back($)))} />}
-          {canControl && <Button key="band-toggle" label={busyText(busy, 'band-toggle', p.isPlaying ? '⏸' : '▶', '…')} plain onPress={() => quiet(withBusy($, 'band-toggle', () => toggle($)))} />}
-          {canControl && <Button key="band-next" label={busyText(busy, 'band-next', '⏭', '…')} plain onPress={() => quiet(withBusy($, 'band-next', () => skip($)))} />}
-          <Button key="band-like" label={busyText(busy, 'band-like', p.liked ? '♥' : '♡', '…')} plain onPress={() => quiet(withBusy($, 'band-like', () => like($, undefined)))} />
-          <Button key="band-open" label="☰" plain dimColor onPress={() => quiet(openPane($, undefined))} />
-        </Box>
-        {line !== undefined && p.isPlaying && (
-          <Text italic color="#1DB954" dimColor wrap="truncate-end">
+        )}
+        {p && (
+          <Box flexDirection="row" gap={1}>
+            <Text color={GREEN}>{p.isPlaying ? '♫' : '⏸'}</Text>
+            <Box flexShrink={1}>
+              <Text wrap="truncate-end">
+                <Text bold>{p.title}</Text>
+                <Text dimColor> — {p.artists}</Text>
+              </Text>
+            </Box>
+            {e.props.bodyColumns > 70 && <Text dimColor>{clock(p.progressMs)}/{clock(p.durationMs)}</Text>}
+            {canControl && <Button key="band-prev" label={busyText(busy, 'band-prev', '⏮', '…')} plain onPress={() => quiet(withBusy($, 'band-prev', () => back($)))} />}
+            {canControl && <Button key="band-toggle" label={busyText(busy, 'band-toggle', p.isPlaying ? '⏸' : '▶', '…')} plain onPress={() => quiet(withBusy($, 'band-toggle', () => toggle($)))} />}
+            {canControl && <Button key="band-next" label={busyText(busy, 'band-next', '⏭', '…')} plain onPress={() => quiet(withBusy($, 'band-next', () => skip($)))} />}
+            <Button key="band-like" label={busyText(busy, 'band-like', p.liked ? '♥' : '♡', '…')} plain onPress={() => quiet(withBusy($, 'band-like', () => like($, undefined)))} />
+            <Button key="band-open" label="☰" plain dimColor onPress={() => quiet(openPane($, undefined))} />
+          </Box>
+        )}
+        {line !== undefined && p?.isPlaying && (
+          <Text italic color={GREEN} dimColor wrap="truncate-end">
             {'  ♪ '}
             {line}
           </Text>
@@ -1373,21 +1759,28 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // Player pane: tabs for the player, lyrics, the DJ and the recap
+  // The pane: Player, Lyrics, DJ, Recap, Library and Settings
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const width = Math.max(20, e.props.bodyColumns)
+    paneColumns = width
     const height = e.viewport?.rows ?? 30
     const isAuthed = await read($, authed)
     const message = await read($, notice)
     const busy = await read($, busyKeys)
+    const s = await read($, settings)
     const good = message.startsWith('✓')
+    const messageLine = message !== '' && (
+      <Text color={good ? GREEN : undefined} dimColor={!good} wrap="wrap">
+        {message}
+      </Text>
+    )
 
     if (!isAuthed) {
       return (
         <Box flexDirection="column" gap={1}>
-          <Text bold color="#1DB954">Spotify</Text>
+          <Text bold color={GREEN}>Spotify</Text>
           <Text>Not connected.</Text>
           <Box flexDirection="column">
             <Text dimColor wrap="wrap">1. Create an app at developer.spotify.com/dashboard (Web API, redirect URI {REDIRECT_URI})</Text>
@@ -1397,7 +1790,7 @@ export const register: Register = (on, options) => {
           <Box>
             <Button key="login" label={busyText(busy, 'login', 'Log in', 'Opening browser…')} variant="primary" hotkey="l" onPress={() => quiet(withBusy($, 'login', () => pressLogin($)))} />
           </Box>
-          {message !== '' && <Text color={good ? GREEN : 'yellow'} wrap="wrap">{message}</Text>}
+          {messageLine}
         </Box>
       )
     }
@@ -1405,31 +1798,46 @@ export const register: Register = (on, options) => {
     const current = await read($, tab)
     const p = await read($, player)
     const free = (await read($, premium)) === false
+    const tabButton = (key: SpotifyTab, label: string, hotkey: string) => (
+      <Button
+        key={`tab-${key}`}
+        label={label}
+        hotkey={hotkey}
+        variant={current === key ? 'primary' : undefined}
+        dimColor={current !== key}
+        onPress={() => quiet(showTab($, key))}
+      />
+    )
     const tabs = (
-      <Box flexDirection="row" columnGap={1}>
-        <Button key="tab-player" label="Player" hotkey="1" variant={current === 'player' ? 'primary' : undefined} dimColor={current !== 'player'} onPress={() => quiet(showTab($, 'player'))} />
-        <Button key="tab-lyrics" label="Lyrics" hotkey="2" variant={current === 'lyrics' ? 'primary' : undefined} dimColor={current !== 'lyrics'} onPress={() => quiet(showTab($, 'lyrics'))} />
-        <Button key="tab-dj" label="DJ" hotkey="3" variant={current === 'dj' ? 'primary' : undefined} dimColor={current !== 'dj'} onPress={() => quiet(showTab($, 'dj'))} />
-        <Button key="tab-recap" label="Recap" hotkey="4" variant={current === 'recap' ? 'primary' : undefined} dimColor={current !== 'recap'} onPress={() => quiet(showTab($, 'recap'))} />
+      <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+        {tabButton('player', 'Player', '1')}
+        {tabButton('lyrics', 'Lyrics', '2')}
+        {tabButton('dj', 'DJ', '3')}
+        {tabButton('recap', 'Recap', '4')}
+        {tabButton('library', 'Library', '5')}
+        {tabButton('settings', 'Settings', '6')}
       </Box>
     )
     const header = p ? (
       <Text wrap="truncate-end">
-        <Text color="#1DB954">{p.isPlaying ? '♫ ' : '⏸ '}</Text>
+        <Text color={GREEN}>{p.isPlaying ? '♫ ' : '⏸ '}</Text>
         <Text bold>{p.title}</Text>
         <Text dimColor> — {p.artists}</Text>
       </Text>
     ) : (
       <Text dimColor>Nothing playing.</Text>
     )
+    const playLabel = (key: string, isCurrent: boolean) => busyText(busy, key, free ? '↗' : isCurrent && p?.isPlaying ? '♫' : '▶', '…')
 
     // ----- lyrics tab -----
     if (current === 'lyrics') {
       const l = await read($, lyrics)
       const idx = await read($, lyricIndex)
-      const room = Math.max(5, Math.min(24, height - 8))
+      const offset = await read($, lyricOffset)
+      const room = Math.max(5, Math.min(24, height - 10))
       let body
-      if (!p) body = <Text dimColor>Start a track to see its lyrics.</Text>
+      if (!isOn(s, 'lyrics')) body = <Text dimColor>Lyrics are off. Turn them on in Settings (6).</Text>
+      else if (!p) body = <Text dimColor>Start a track to see its lyrics.</Text>
       else if (!l || l.trackId !== p.id || l.status === 'loading') body = <Text dimColor>Looking up lyrics…</Text>
       else if (l.status === 'instrumental') body = <Text dimColor>♪ Instrumental ♪</Text>
       else if (l.status === 'missing') body = <Text dimColor>No lyrics found on LRCLIB for this track.</Text>
@@ -1453,10 +1861,16 @@ export const register: Register = (on, options) => {
                   plain
                   label={`${i === idx ? '▶ ' : '  '}${x.text || '♪'}`}
                   dimColor={i !== idx}
-                  onPress={() => quiet(seekTo($, x.t))}
+                  onPress={() => quiet(seekTo($, x.t - offset))}
                 />
               )
             })}
+            <Box flexDirection="row" columnGap={1}>
+              <Text dimColor>timing{offset !== 0 ? ` ${offset > 0 ? '+' : ''}${offset / 1000}s` : ''}:</Text>
+              <Button key="ly-earlier" label="earlier" hotkey="z" plain dimColor onPress={() => quiet(nudgeLyrics($, 500))} />
+              <Button key="ly-later" label="later" hotkey="x" plain dimColor onPress={() => quiet(nudgeLyrics($, -500))} />
+              {offset !== 0 && <Button key="ly-reset" label="reset" hotkey="c" plain dimColor onPress={() => quiet(nudgeLyrics($, null))} />}
+            </Box>
             <Text dimColor>press a line to jump there · lyrics from lrclib.net</Text>
           </Box>
         )
@@ -1473,7 +1887,7 @@ export const register: Register = (on, options) => {
     // ----- DJ tab -----
     if (current === 'dj') {
       const d = await read($, dj)
-      const auto = await read($, autopilot)
+      const auto = isOn(s, 'autopilot')
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
@@ -1481,12 +1895,12 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text bold>Claude DJ</Text>
             {d.status === 'idle' && <Text dimColor wrap="wrap">Picks music for what you are working on in this session, then plays or queues it.</Text>}
-            {d.status === 'thinking' && <Text color="#1DB954">Reading the session and digging through crates…</Text>}
+            {d.status === 'thinking' && <Text color={GREEN}>Reading the session and digging through crates…</Text>}
             {d.status === 'error' && <Text color="yellow" wrap="wrap">{d.reason}</Text>}
             {d.status === 'done' && (
               <Box flexDirection="column">
                 <Text>
-                  <Text color="#1DB954" bold>{d.vibe}</Text>
+                  <Text color={GREEN} bold>{d.vibe}</Text>
                   <Text dimColor> · {d.source === 'autopilot' ? 'autopilot' : 'on request'} at {hhmm(d.at)}</Text>
                 </Text>
                 <Text italic wrap="wrap">{d.reason}</Text>
@@ -1497,7 +1911,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column">
               {d.picks.map((x, i) => (
                 <Box flexDirection="row" gap={1}>
-                  <Button key={`dj-play-${i}`} label={busyText(busy, `dj-play-${i}`, free ? '↗' : '▶', '…')} plain onPress={() => quiet(withBusy($, `dj-play-${i}`, () => playPick($, x)))} />
+                  <Button key={`dj-play-${i}`} label={playLabel(`dj-play-${i}`, p?.uri === x.uri)} plain onPress={() => quiet(withBusy($, `dj-play-${i}`, () => playPick($, x)))} />
                   <Box flexShrink={1}>
                     <Text wrap="truncate-end">
                       {x.title}
@@ -1510,15 +1924,15 @@ export const register: Register = (on, options) => {
           )}
           <Box flexDirection="row" columnGap={1}>
             <Button key="dj-spin" label={d.status === 'thinking' ? 'picking…' : free ? 'Make a playlist' : 'Spin a set'} hotkey="j" variant="primary" onPress={() => quiet(runDj($, 'session', ''))} />
-            {!free && <Button key="dj-auto" label={`Autopilot: ${auto ? 'on' : 'off'}`} hotkey="a" onPress={() => quiet(setAutopilot($, undefined))} />}
+            {!free && <Button key="dj-auto" label={`Autopilot: ${auto ? 'on' : 'off'}`} hotkey="a" onPress={() => quiet(setSetting($, 'autopilot', auto ? 'off' : 'on'))} />}
             {free && d.link !== '' && <Button key="dj-open" label="Open playlist" hotkey="o" onPress={() => quiet(openBrowser($, d.link))} />}
           </Box>
           <Text dimColor wrap="wrap">
             {free
               ? 'Free account: the DJ saves its picks as a playlist and opens it in Spotify. /spotify dj <hint> steers it.'
-              : 'Autopilot re-picks every few turns, and when tool calls start failing. /spotify dj <hint> steers it.'}
+              : `Autopilot re-picks every few turns${isOn(s, 'djEvents') ? ', and when tests fail or pass' : ''}. ${isOn(s, 'djLearns') ? 'It learns from DJ picks you skip or like. ' : ''}/spotify dj <hint> steers it.`}
           </Text>
-          {message !== '' && <Text color={good ? GREEN : undefined} dimColor={!good} wrap="wrap">{message}</Text>}
+          {messageLine}
         </Box>
       )
     }
@@ -1526,14 +1940,22 @@ export const register: Register = (on, options) => {
     // ----- recap tab -----
     if (current === 'recap') {
       const entries = await read($, recap)
-      const room = Math.max(3, Math.floor((height - 10) / 2))
+      const stats = recapStats(entries, await $.clock.now())
+      const room = Math.max(3, Math.floor((height - 12) / 2))
       const shown = entries.slice(-room)
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
-          <Text bold>Session soundtrack · {entries.length} track{entries.length === 1 ? '' : 's'}</Text>
+          <Box flexDirection="column">
+            <Text bold>Session soundtrack · {entries.length} track{entries.length === 1 ? '' : 's'}{entries.length ? ` · ${stats.minutes} min` : ''}</Text>
+            {stats.topArtist !== '' && (
+              <Text dimColor wrap="truncate-end">
+                top artist {stats.topArtist} ({stats.topArtistCount}×){stats.busiest ? ` · most productive: "${stats.busiest.title}"` : ''} · {stats.files} files
+              </Text>
+            )}
+          </Box>
           {entries.length === 0 && <Text dimColor>Tracks you play during this session show here, with what Claude was doing meanwhile.</Text>}
-          {message !== '' && <Text color={good ? GREEN : 'yellow'} wrap="wrap">{message}</Text>}
+          {messageLine}
           <Box flexDirection="column">
             {entries.length > shown.length && <Text dimColor>… {entries.length - shown.length} earlier</Text>}
             {shown.map((x, k) => {
@@ -1544,7 +1966,7 @@ export const register: Register = (on, options) => {
                   <Box flexDirection="row" gap={1}>
                     <Button
                       key={`recap-play-${i}`}
-                      label={busyText(busy, `recap-play-${i}`, free ? '↗' : playing && p?.isPlaying ? '♫' : '▶', '…')}
+                      label={playLabel(`recap-play-${i}`, playing)}
                       plain
                       dimColor={playing}
                       onPress={() => quiet(withBusy($, `recap-play-${i}`, () => playPick($, recapItem(x))))}
@@ -1562,12 +1984,111 @@ export const register: Register = (on, options) => {
               )
             })}
           </Box>
-          <Box flexDirection="row" columnGap={1}>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
             {!free && entries.length > 0 && (
               <Button key="recap-all" label={busyText(busy, 'recap-all', '▶ Play all', 'starting…')} hotkey="p" onPress={() => quiet(withBusy($, 'recap-all', () => playRecap($)))} />
             )}
             <Button key="recap-save" label={busyText(busy, 'recap-save', 'Save as playlist', 'Saving…')} hotkey="v" variant="primary" onPress={() => quiet(withBusy($, 'recap-save', () => pressSave($)))} />
+            {entries.length > 0 && (
+              <Button key="recap-copy" label="Copy summary" hotkey="y" onPress={press => quiet(copyCard($, press.surface))} />
+            )}
           </Box>
+        </Box>
+      )
+    }
+
+    // ----- library tab -----
+    if (current === 'library') {
+      const lib = await read($, library)
+      const room = Math.max(5, height - 10)
+      const viewButton = (view: LibraryView, label: string, hotkey: string) => (
+        <Button
+          key={`lib-${view}`}
+          label={busyText(busy, `lib-${view}`, label, `${label}…`)}
+          hotkey={hotkey}
+          variant={lib.view === view ? 'primary' : undefined}
+          dimColor={lib.view !== view}
+          onPress={() => quiet(withBusy($, `lib-${view}`, () => loadLibrary($, view)))}
+        />
+      )
+      return (
+        <Box flexDirection="column" gap={1}>
+          {tabs}
+          <Box flexDirection="row" columnGap={1}>
+            {viewButton('playlists', 'Playlists', 'q')}
+            {viewButton('liked', 'Liked Songs', 'w')}
+            {viewButton('recent', 'Recently played', 'e')}
+          </Box>
+          {lib.status === 'loading' && <Text dimColor>Loading…</Text>}
+          {lib.status === 'idle' && <Text dimColor>Pick a list above.</Text>}
+          {lib.status === 'done' && lib.items.length === 0 && <Text dimColor>Nothing here yet.</Text>}
+          {lib.status === 'error' && <Text color="yellow">Spotify did not return this list.</Text>}
+          {lib.items.length > 0 && (
+            <Box flexDirection="column">
+              {lib.items.slice(0, room).map((x, i) => (
+                <Box flexDirection="row" gap={1}>
+                  <Button key={`lib-play-${i}`} label={playLabel(`lib-play-${i}`, p?.uri === x.uri)} plain onPress={() => quiet(withBusy($, `lib-play-${i}`, () => playPick($, x)))} />
+                  <Box flexShrink={1}>
+                    <Text wrap="truncate-end">
+                      {x.title}
+                      <Text dimColor> — {x.subtitle}</Text>
+                    </Text>
+                  </Box>
+                </Box>
+              ))}
+            </Box>
+          )}
+          {messageLine}
+        </Box>
+      )
+    }
+
+    // ----- settings tab -----
+    if (current === 'settings') {
+      const group = await read($, settingsGroup)
+      const defs = SETTINGS.filter(d => d.group === group)
+      return (
+        <Box flexDirection="column" gap={1}>
+          {tabs}
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            {GROUPS.map(g => (
+              <Button key={`group-${g}`} label={g} plain dimColor={g !== group} onPress={() => quiet(showGroup($, g))} />
+            ))}
+          </Box>
+          <Box flexDirection="column" gap={1}>
+            {defs.map(d => {
+              const value = s[d.key] ?? d.default
+              return (
+                <Box flexDirection="column">
+                  {'Select' in ui ? (
+                    <ui.Select
+                      key={`set-${d.key}`}
+                      label={`${d.label}: `}
+                      options={d.options.map(o => ({ value: o.value, label: o.label }))}
+                      value={value}
+                      onSelect={v => quiet(setSetting($, d.key, v).then(t => say($, `✓ ${t}`)))}
+                    />
+                  ) : (
+                    <Button
+                      key={`set-${d.key}`}
+                      label={`${d.label}: ${optionLabel(d, value)}`}
+                      plain
+                      onPress={() => {
+                        const i = d.options.findIndex(o => o.value === value)
+                        const nextValue = d.options[(i + 1) % d.options.length]!.value
+                        quiet(setSetting($, d.key, nextValue).then(t => say($, `✓ ${t}`)))
+                      }}
+                    />
+                  )}
+                  <Text dimColor wrap="wrap">{'  '}{d.help}</Text>
+                </Box>
+              )
+            })}
+          </Box>
+          <Box flexDirection="row" columnGap={1}>
+            <Button key="settings-reset" label="Reset to defaults" plain dimColor onPress={() => quiet(resetSettings($).then(t => say($, `✓ ${t}`)))} />
+          </Box>
+          {messageLine}
         </Box>
       )
     }
@@ -1580,49 +2101,51 @@ export const register: Register = (on, options) => {
     const at = await read($, pos)
     const shownPos = p ? (p.isPlaying ? Math.max(at, p.progressMs) : p.progressMs) : 0
     const line = await currentLyric($)
-    const hasRaster = 'Raster' in ui
-    const showArt = hasRaster && cover !== null && p !== null && cover.url === p.imageUrl && width >= 50
+    const showArt = cover !== null && p !== null && cover.url === p.imageUrl && width >= 50 && s.art !== 'off'
     const vizColumns = Math.min(VIZ_COLUMNS, width)
+    const showViz = p !== null && isOn(s, 'visualizer')
 
     const info = p ? (
       <Box flexDirection="column" flexShrink={1}>
-        <Text bold color="#1DB954" wrap="truncate-end">{p.isPlaying ? '♫ ' : '⏸ '}{p.title}</Text>
+        <Text bold color={GREEN} wrap="truncate-end">{p.isPlaying ? '♫ ' : '⏸ '}{p.title}</Text>
         <Text wrap="truncate-end">{p.artists}</Text>
         <Text dimColor wrap="truncate-end">{p.album}</Text>
         <Text>
-          <Text color="#1DB954">{bar(shownPos, p.durationMs, Math.min(30, width - (showArt ? 36 : 14)))}</Text>
+          <Text color={GREEN}>{bar(shownPos, p.durationMs, Math.min(30, width - (showArt ? cover.columns + 16 : 14)))}</Text>
           <Text dimColor> {clock(shownPos)} / {clock(p.durationMs)}</Text>
         </Text>
         <Text dimColor wrap="truncate-end">
           {p.device || 'unknown device'} · vol {p.volume ?? '?'}% · shuffle {p.shuffle ? 'on' : 'off'} · repeat {p.repeat}
         </Text>
-        {line !== undefined && (
-          <Text italic dimColor wrap="truncate-end">♪ {line}</Text>
-        )}
+        {line !== undefined && <Text italic dimColor wrap="truncate-end">♪ {line}</Text>}
       </Box>
     ) : (
       <Text dimColor>Nothing playing. Start Spotify on a device, search below, or press DJ.</Text>
     )
 
+    let artElement = null
+    if (showArt && 'Raster' in ui) artElement = <ui.Raster key="art" columns={cover.columns} rows={cover.rows} cells={cover.cells} />
+    else if (showArt && 'Svg' in ui) artElement = <ui.Svg source={artSvg(cover.pixels, cover.size, Math.max(3, Math.round(120 / cover.size)))} alt={`Cover of ${p.album}`} />
+
+    let vizElement = null
+    if (showViz && 'Raster' in ui) {
+      vizElement = <ui.Raster key="viz" columns={vizColumns} rows={VIZ_ROWS} cells={vizCells(vizColumns, VIZ_ROWS, shownPos, p.id, cover?.palette ?? [], p.isPlaying ? 1 : 0)} />
+    } else if (showViz && 'Svg' in ui) {
+      vizElement = <ui.Svg source={vizSvg(24, p.id, cover?.palette ?? [], p.isPlaying)} alt="Visualizer" isInteractive />
+    }
+
     return (
       <Box flexDirection="column" gap={1}>
         {tabs}
-        {showArt && 'Raster' in ui ? (
+        {artElement ? (
           <Box flexDirection="row" gap={2}>
-            <ui.Raster key="art" columns={cover.columns} rows={cover.rows} cells={cover.cells} />
+            {artElement}
             {info}
           </Box>
         ) : (
           info
         )}
-        {p && 'Raster' in ui && (
-          <ui.Raster
-            key="viz"
-            columns={vizColumns}
-            rows={VIZ_ROWS}
-            cells={vizCells(vizColumns, VIZ_ROWS, shownPos, p.id, cover?.palette ?? [], p.isPlaying ? 1 : 0)}
-          />
-        )}
+        {vizElement}
 
         {free ? (
           <Box flexDirection="column">
@@ -1632,19 +2155,19 @@ export const register: Register = (on, options) => {
             <Text dimColor wrap="wrap">Free account: play, pause and skip in the Spotify app. ↗ opens a track there.</Text>
           </Box>
         ) : (
-        <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-          <Button key="prev" label={busyText(busy, 'prev', '⏮ prev', '⏮ …')} hotkey="b" onPress={() => quiet(withBusy($, 'prev', () => back($)))} />
-          <Button key="toggle" label={busyText(busy, 'toggle', p?.isPlaying ? '⏸ pause' : '▶ play', p?.isPlaying ? '⏸ pausing…' : '▶ starting…')} hotkey="p" variant="primary" onPress={() => quiet(withBusy($, 'toggle', () => toggle($)))} />
-          <Button key="next" label={busyText(busy, 'next', '⏭ next', '⏭ skipping…')} hotkey="n" onPress={() => quiet(withBusy($, 'next', () => skip($)))} />
-          <Button key="voldown" label={busyText(busy, 'voldown', 'vol −', 'vol …')} hotkey="d" onPress={() => quiet(withBusy($, 'voldown', () => volumeBy($, -10)))} />
-          <Button key="volup" label={busyText(busy, 'volup', 'vol +', 'vol …')} hotkey="u" onPress={() => quiet(withBusy($, 'volup', () => volumeBy($, 10)))} />
-          <Button key="shuffle" label={busyText(busy, 'shuffle', p?.shuffle ? 'shuffle on' : 'shuffle off', 'shuffle …')} hotkey="s" onPress={() => quiet(withBusy($, 'shuffle', () => toggleShuffle($)))} />
-          <Button key="repeat" label={busyText(busy, 'repeat', `repeat ${p?.repeat ?? 'off'}`, 'repeat …')} hotkey="r" onPress={() => quiet(withBusy($, 'repeat', () => cycleRepeat($)))} />
-          <Button key="like" label={busyText(busy, 'like', p?.liked ? '♥ liked' : '♡ like', '♥ saving…')} hotkey="l" onPress={() => quiet(withBusy($, 'like', () => like($, undefined)))} />
-        </Box>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            <Button key="prev" label={busyText(busy, 'prev', '⏮ prev', '⏮ …')} hotkey="b" onPress={() => quiet(withBusy($, 'prev', () => back($)))} />
+            <Button key="toggle" label={busyText(busy, 'toggle', p?.isPlaying ? '⏸ pause' : '▶ play', p?.isPlaying ? '⏸ pausing…' : '▶ starting…')} hotkey="p" variant="primary" onPress={() => quiet(withBusy($, 'toggle', () => toggle($)))} />
+            <Button key="next" label={busyText(busy, 'next', '⏭ next', '⏭ skipping…')} hotkey="n" onPress={() => quiet(withBusy($, 'next', () => skip($)))} />
+            <Button key="voldown" label={busyText(busy, 'voldown', 'vol −', 'vol …')} hotkey="d" onPress={() => quiet(withBusy($, 'voldown', () => volumeBy($, -10)))} />
+            <Button key="volup" label={busyText(busy, 'volup', 'vol +', 'vol …')} hotkey="u" onPress={() => quiet(withBusy($, 'volup', () => volumeBy($, 10)))} />
+            <Button key="shuffle" label={busyText(busy, 'shuffle', p?.shuffle ? 'shuffle on' : 'shuffle off', 'shuffle …')} hotkey="s" onPress={() => quiet(withBusy($, 'shuffle', () => toggleShuffle($)))} />
+            <Button key="repeat" label={busyText(busy, 'repeat', `repeat ${p?.repeat ?? 'off'}`, 'repeat …')} hotkey="r" onPress={() => quiet(withBusy($, 'repeat', () => cycleRepeat($)))} />
+            <Button key="like" label={busyText(busy, 'like', p?.liked ? '♥ liked' : '♡ like', '♥ saving…')} hotkey="l" onPress={() => quiet(withBusy($, 'like', () => like($, undefined)))} />
+          </Box>
         )}
 
-        {message !== '' && <Text color={good ? GREEN : undefined} dimColor={!good} wrap="wrap">{message}</Text>}
+        {messageLine}
 
         {'Input' in ui && (
           <ui.Input
@@ -1666,7 +2189,7 @@ export const register: Register = (on, options) => {
             </Box>
             {found.map((x, i) => (
               <Box flexDirection="row" gap={1}>
-                <Button key={`play-${i}`} label={busyText(busy, `play-${i}`, free ? '↗' : '▶', '…')} plain onPress={() => quiet(withBusy($, `play-${i}`, () => playPick($, x)))} />
+                <Button key={`play-${i}`} label={playLabel(`play-${i}`, p?.uri === x.uri)} plain onPress={() => quiet(withBusy($, `play-${i}`, () => playPick($, x)))} />
                 {x.kind === 'track' && !free ? (
                   <Button key={`queue-${i}`} label={busyText(busy, `queue-${i}`, '+', '…')} plain dimColor onPress={() => quiet(withBusy($, `queue-${i}`, () => enqueue($, x.uri, `"${x.title}"`)))} />
                 ) : (
@@ -1700,15 +2223,16 @@ export const register: Register = (on, options) => {
             <Button key="load-devices" label={busyText(busy, 'load-devices', 'refresh', 'refreshing…')} plain dimColor onPress={() => quiet(withBusy($, 'load-devices', () => loadDevices($)))} />
           </Box>
           {free && devs.map(d => <Text dimColor={!d.isActive}>{`${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`}</Text>)}
-          {!free && devs.map((d, i) => (
-            <Button
-              key={`dev-${i}`}
-              label={busyText(busy, `dev-${i}`, `${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`, `  moving playback to ${d.name}…`)}
-              plain
-              dimColor={!d.isActive}
-              onPress={() => quiet(withBusy($, `dev-${i}`, () => useDevice($, d.id)))}
-            />
-          ))}
+          {!free &&
+            devs.map((d, i) => (
+              <Button
+                key={`dev-${i}`}
+                label={busyText(busy, `dev-${i}`, `${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`, `  moving playback to ${d.name}…`)}
+                plain
+                dimColor={!d.isActive}
+                onPress={() => quiet(withBusy($, `dev-${i}`, () => useDevice($, d.id)))}
+              />
+            ))}
         </Box>
 
         <Box>

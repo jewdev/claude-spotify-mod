@@ -1,73 +1,8 @@
-import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, test } from 'claude-code/testing'
 
 import { bar, clock, codeFromRedirect, parseQuery } from '../hooks/lib'
 import { lyricIndexAt, parseDjPlan, parseLrc, recapLine, vizCells } from '../hooks/media'
-
-const PANE_PROPS = { title: 'Spotify', isFocused: true, bodyColumns: 80, placement: 'dock' } as never
-
-const TOKENS = { tokens: { access: 'AT', refresh: 'RT', expiresAt: 9e15 }, clientId: 'cid' }
-
-const PLAYER = {
-  is_playing: true,
-  progress_ms: 61_000,
-  shuffle_state: false,
-  repeat_state: 'off',
-  device: { name: 'Desk PC', volume_percent: 40 },
-  item: {
-    type: 'track',
-    id: 't1',
-    uri: 'spotify:track:t1',
-    name: 'Around the World',
-    duration_ms: 180_000,
-    artists: [{ name: 'Daft Punk' }],
-    album: { name: 'Homework' },
-  },
-}
-
-type Call = { method: string; url: string; body?: string }
-
-/** Fakes the Spotify Web API beneath the plugin and records every request. */
-function fakeSpotify(on: On, store: Record<string, unknown> = TOKENS, plan: 'premium' | 'free' = 'premium') {
-  const calls: Call[] = []
-  mock.store(on, store)
-  mock.env(on, { OS: 'Windows_NT' })
-  on('clock.now', () => ({ value: 1_000 }))
-  on('clock.sleep', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
-  on('ui.status', () => ({ value: undefined }) as never)
-  on('http.fetch', async (_$, e) => {
-    const method = e.init?.method ?? 'GET'
-    calls.push({ method, url: e.url, body: e.init?.body })
-    const json = (status: number, body: unknown) => ({
-      value: { status, ok: status < 300, headers: {}, text: body === undefined ? '' : JSON.stringify(body) },
-    })
-    const { hostname, pathname } = new URL(e.url)
-    if (hostname === 'lrclib.net' && pathname === '/api/get') {
-      return json(200, { syncedLyrics: '[00:00.50] Around the world\n[00:59.00] Around the world, again\n[01:30.00] Third line' })
-    }
-    if (hostname === 'accounts.spotify.com') {
-      return json(200, { access_token: 'AT2', refresh_token: 'RT2', expires_in: 3600, scope: 'playlist-modify-private' })
-    }
-    if (pathname === '/v1/me' && method === 'GET') return json(200, { id: 'u1', display_name: 'Ada', product: plan })
-    if (plan === 'free' && pathname.startsWith('/v1/me/player/') && method !== 'GET') {
-      return json(403, { error: { status: 403, message: 'Player command failed: Premium required', reason: 'PREMIUM_REQUIRED' } })
-    }
-    if (pathname === '/v1/me/playlists' && method === 'POST') {
-      return json(201, { id: 'pl1', external_urls: { spotify: 'https://open.spotify.com/playlist/pl1' } })
-    }
-    if (pathname === '/v1/me/player' && method === 'GET') return json(200, PLAYER)
-    if (pathname === '/v1/me/player/queue') return json(200, { queue: [] })
-    if (pathname.endsWith('/contains')) return json(200, [true])
-    if (pathname === '/v1/search') {
-      return json(200, {
-        tracks: { items: [{ type: 'track', uri: 'spotify:track:t9', name: 'One More Time', artists: [{ name: 'Daft Punk' }], album: { name: 'Discovery' } }] },
-      })
-    }
-    return json(204, undefined)
-  })
-  return calls
-}
+import { PANE_PROPS, SCOPED, TOKENS, fakeSpotify, settle } from './fake'
 
 describe('lib', () => {
   test('pulls the code out of a pasted redirect URL', () => {
@@ -136,11 +71,6 @@ test('pane and band show the track and play/pause works', async ($, on) => {
   }
 })
 
-/** Lets work the plugin started without awaiting (lyrics, art, the recap entry) settle. */
-async function settle($: { command: { run: (e: never) => Promise<unknown> } }) {
-  for (let i = 0; i < 5; i++) await $.command.run({ command: 'spotify', args: 'help' } as never)
-}
-
 describe('media', () => {
   test('parses LRC and finds the line being sung', () => {
     const lines = parseLrc('[00:01.00] one\n[00:02.50][00:05.00] two\nno stamp\n[00:03.00] three')
@@ -202,7 +132,6 @@ test('the recap ties edits to the track that was playing', async ($, on) => {
   expect(text).toContain('edited auth.ts')
 })
 
-const SCOPED = { ...TOKENS, tokens: { ...TOKENS.tokens, scope: 'user-read-playback-state playlist-modify-private' } }
 
 test('saving the recap asks for a fresh login when playlist permission is missing', async ($, on) => {
   const calls = fakeSpotify(on)

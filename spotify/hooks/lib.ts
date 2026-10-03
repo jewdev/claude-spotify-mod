@@ -41,6 +41,21 @@ export function webUrl(uri: string): string {
   return kind && id ? `https://open.spotify.com/${kind}/${id}` : 'https://open.spotify.com'
 }
 
+const PICTOGRAPHS = /[\p{Extended_Pictographic}\u200D\uFE0E\uFE0F\u{1F3FB}-\u{1F3FF}]/gu
+const RTL = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/
+const LRM = '\u200E'
+
+/**
+ * Text as the terminal can lay it out: emoji dropped (drawn two columns wide,
+ * counted as one, they push the rest of the row out of line), and text with
+ * right-to-left letters led by a left-to-right mark, so a row that starts with
+ * a Hebrew or Arabic name keeps its left-to-right order.
+ */
+export function clean(text: string): string {
+  const plain = String(text ?? '').replace(PICTOGRAPHS, '').replace(/\s{2,}/g, ' ').trim()
+  return RTL.test(plain) ? LRM + plain : plain
+}
+
 export const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 export function base64url(bytes: Uint8Array): string {
@@ -89,7 +104,7 @@ function pickImage(images: any): string {
 }
 
 const artistsOf = (item: any): string =>
-  (item?.artists ?? []).map((a: any) => a.name).join(', ') || item?.show?.name || ''
+  clean((item?.artists ?? []).map((a: any) => a.name).join(', ') || item?.show?.name || '')
 
 export function toPlayer(data: any, now: number): SpotifyPlayer | null {
   const item = data?.item
@@ -99,15 +114,15 @@ export function toPlayer(data: any, now: number): SpotifyPlayer | null {
     kind: isEpisode ? 'episode' : 'track',
     id: item.id ?? item.uri,
     uri: item.uri,
-    title: item.name,
+    title: clean(item.name),
     artists: artistsOf(item),
-    album: isEpisode ? item.show?.name ?? '' : item.album?.name ?? '',
+    album: clean(isEpisode ? item.show?.name ?? '' : item.album?.name ?? ''),
     imageUrl: pickImage(isEpisode ? item.images ?? item.show?.images : item.album?.images),
     isPlaying: Boolean(data.is_playing),
     progressMs: data.progress_ms ?? 0,
     durationMs: item.duration_ms ?? 0,
     fetchedAt: now,
-    device: data.device?.name ?? '',
+    device: clean(data.device?.name ?? ''),
     volume: data.device?.volume_percent ?? null,
     shuffle: Boolean(data.shuffle_state),
     repeat: data.repeat_state ?? 'off',
@@ -121,9 +136,9 @@ export function toItem(x: any): SpotifyItem {
     kind === 'track' ? `${artistsOf(x)} · ${x.album?.name ?? ''}`
     : kind === 'album' ? `${artistsOf(x)} · album`
     : kind === 'artist' ? 'artist'
-    : kind === 'playlist' ? `playlist by ${x.owner?.display_name ?? 'unknown'}`
+    : kind === 'playlist' ? `playlist by ${clean(x.owner?.display_name ?? 'unknown')}`
     : artistsOf(x)
-  return { uri: x.uri, kind, title: x.name, subtitle }
+  return { uri: x.uri, kind, title: clean(x.name) || '(untitled)', subtitle: clean(subtitle) }
 }
 
 /** `artist: daft punk` → { kind: 'artist', query: 'daft punk' }; plain text is a track. */
@@ -223,6 +238,11 @@ export const USAGE = [
   '/spotify search <query>  show results in the pane',
   '/spotify devices | device <name>',
   '/spotify band            show or hide the now-playing band',
+  '/spotify library         your playlists, Liked Songs and recently played',
+  '/spotify focus [min|stop]  a focus timer and a break (the music is left alone)',
+  '/spotify lyrics earlier|later|reset  nudge the lyric timing for this track',
+  '/spotify settings        every option, also in the pane (tab 6)',
+  '/spotify set <key> <value>  change one setting; /spotify set lists them',
   '/spotify lyrics          synced lyrics for the current track',
   '/spotify dj [hint]       Claude picks music for what you are working on and queues it',
   '/spotify autopilot       let the DJ re-pick as the session changes mood (on/off)',

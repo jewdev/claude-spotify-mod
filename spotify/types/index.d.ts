@@ -32,7 +32,7 @@ export type SpotifyDevice = {
   volume: number | null
 }
 
-export type SpotifyTab = 'player' | 'lyrics' | 'dj' | 'recap'
+export type SpotifyTab = 'player' | 'lyrics' | 'dj' | 'recap' | 'library' | 'settings'
 
 export type LyricLine = { t: number; text: string }
 
@@ -44,6 +44,10 @@ export type SpotifyLyrics = {
 
 export type SpotifyArt = {
   url: string
+  /** Pixels per side; the Raster is that many columns and half as many rows. */
+  size: number
+  /** RRGGBB per pixel, row-major: the desktop draws its Svg from it. */
+  pixels: string
   columns: number
   rows: number
   cells: string
@@ -73,6 +77,20 @@ export type RecapEntry = {
   moments: string[]
 }
 
+export type SpotifyFocus = {
+  phase: 'focus' | 'break'
+  endsAt: number
+  minutes: number
+}
+
+export type LibraryView = 'playlists' | 'liked' | 'recent'
+
+export type SpotifyLibrary = {
+  view: LibraryView
+  status: 'idle' | 'loading' | 'done' | 'error'
+  items: SpotifyItem[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     spotify: {
@@ -82,7 +100,6 @@ declare module 'claude-code' {
       results: SpotifyItem[]
       upNext: SpotifyItem[]
       devices: SpotifyDevice[]
-      bandHidden: boolean
       paneOpen: boolean
       tab: SpotifyTab
       pos: number
@@ -90,7 +107,6 @@ declare module 'claude-code' {
       lyricIndex: number
       art: SpotifyArt | null
       dj: SpotifyDj
-      autopilot: boolean
       recap: RecapEntry[]
       /** true Premium, false free, null not known yet. */
       premium: boolean | null
@@ -98,6 +114,16 @@ declare module 'claude-code' {
       busy: string[]
       /** A success line shown in green above the prompt for a few seconds. */
       flash: string
+      /** The settings page's values, by key (see hooks/settings.ts). */
+      settings: Record<string, string>
+      /** Milliseconds added to the current track's lyric timing. */
+      lyricOffset: number
+      focus: SpotifyFocus | null
+      /** Seconds left in the focus block or break, for the band's countdown. */
+      focusLeft: number
+      library: SpotifyLibrary
+      /** Which group the Settings tab shows. */
+      settingsGroup: string
     }
   }
 }

@@ -169,6 +169,7 @@ async function tokenRequest($: Engine, form: Record<string, string>, previousRef
     access: body.access_token,
     refresh: body.refresh_token ?? previousRefresh,
     expiresAt: now + (Number(body.expires_in ?? 3600) - 60) * 1000,
+    scope: typeof body.scope === 'string' ? body.scope : undefined,
   }
 }
 
@@ -796,7 +797,11 @@ async function noteActivity($: Engine, file: string | undefined, failed: boolean
   })
 }
 
+const RELOGIN = 'Spotify needs playlist permission first: run /spotify login once more, approve, then save again.'
+
 async function savePlaylist($: Engine, name: string): Promise<string> {
+  const tokens = (await $.store.get('tokens')) as Tokens | undefined
+  if (!tokens?.scope?.includes('playlist-modify')) return RELOGIN
   const entries = await read($, recap)
   const uris = [...new Set(entries.map(e => e.uri).filter(u => u.startsWith('spotify:track:')))]
   if (uris.length === 0) return 'Nothing to save yet: no tracks have played this session.'
@@ -825,15 +830,17 @@ async function savePlaylist($: Engine, name: string): Promise<string> {
     return `Saved "${title}" with ${uris.length} tracks.${link ? ` ${link}` : ''}`
   } catch (err) {
     if (err instanceof SpotifyError && (err.status === 403 || err.status === 401)) {
-      return 'Spotify refused to create the playlist. Run /spotify login once more to grant playlist access, then try again.'
+      return `${RELOGIN} (Spotify said: ${err.message})`
     }
     return errText(err)
   }
 }
 
 async function pressSave($: Engine) {
+  await update($, notice, () => 'Saving the session as a playlist…')
   const text = await savePlaylist($, '')
   await update($, notice, () => text)
+  $.ui.toast(text, { timeoutMs: 8000 })
 }
 
 // ---------- tools for Claude ----------
@@ -1359,6 +1366,7 @@ export const register: Register = (on, options) => {
           {tabs}
           <Text bold>Session soundtrack · {entries.length} track{entries.length === 1 ? '' : 's'}</Text>
           {entries.length === 0 && <Text dimColor>Tracks you play during this session show here, with what Claude was doing meanwhile.</Text>}
+          {message !== '' && <Text color="yellow" wrap="wrap">{message}</Text>}
           <Box flexDirection="column">
             {entries.length > shown.length && <Text dimColor>… {entries.length - shown.length} earlier</Text>}
             {shown.map(x => (
@@ -1376,7 +1384,6 @@ export const register: Register = (on, options) => {
           <Box>
             <Button key="recap-save" label="Save as playlist" hotkey="v" variant="primary" onPress={() => quiet(pressSave($))} />
           </Box>
-          {message !== '' && <Text dimColor wrap="wrap">{message}</Text>}
         </Box>
       )
     }

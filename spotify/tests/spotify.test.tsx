@@ -28,9 +28,9 @@ const PLAYER = {
 type Call = { method: string; url: string; body?: string }
 
 /** Fakes the Spotify Web API beneath the plugin and records every request. */
-function fakeSpotify(on: On) {
+function fakeSpotify(on: On, store: Record<string, unknown> = TOKENS) {
   const calls: Call[] = []
-  mock.store(on, TOKENS)
+  mock.store(on, store)
   mock.env(on, { OS: 'Windows_NT' })
   on('clock.now', () => ({ value: 1_000 }))
   on('clock.sleep', () => ({ value: undefined }))
@@ -45,6 +45,9 @@ function fakeSpotify(on: On) {
     const { hostname, pathname } = new URL(e.url)
     if (hostname === 'lrclib.net' && pathname === '/api/get') {
       return json(200, { syncedLyrics: '[00:00.50] Around the world\n[00:59.00] Around the world, again\n[01:30.00] Third line' })
+    }
+    if (pathname === '/v1/me/playlists' && method === 'POST') {
+      return json(201, { id: 'pl1', external_urls: { spotify: 'https://open.spotify.com/playlist/pl1' } })
     }
     if (pathname === '/v1/me/player' && method === 'GET') return json(200, PLAYER)
     if (pathname === '/v1/me/player/queue') return json(200, { queue: [] })
@@ -190,4 +193,25 @@ test('the recap ties edits to the track that was playing', async ($, on) => {
   const { text } = await $.command.run({ command: 'spotify', args: 'recap' } as never)
   expect(text).toContain('Around the World')
   expect(text).toContain('edited auth.ts')
+})
+
+const SCOPED = { ...TOKENS, tokens: { ...TOKENS.tokens, scope: 'user-read-playback-state playlist-modify-private' } }
+
+test('saving the recap asks for a fresh login when playlist permission is missing', async ($, on) => {
+  const calls = fakeSpotify(on)
+  await $.command.run({ command: 'spotify', args: 'now' } as never)
+  await settle($)
+  const { text } = await $.command.run({ command: 'spotify', args: 'recap save' } as never)
+  expect(text).toContain('/spotify login')
+  expect(calls.some(c => c.url.includes('/playlists'))).toBe(false)
+})
+
+test('saving the recap creates a playlist with the session tracks', async ($, on) => {
+  const calls = fakeSpotify(on, SCOPED)
+  await $.command.run({ command: 'spotify', args: 'now' } as never)
+  await settle($)
+  const { text } = await $.command.run({ command: 'spotify', args: 'recap save Late night refactor' } as never)
+  expect(text).toContain('Saved "Late night refactor" with 1 tracks')
+  const add = calls.find(c => c.method === 'POST' && c.url.endsWith('/playlists/pl1/items'))
+  expect(add?.body).toBe(JSON.stringify({ uris: ['spotify:track:t1'] }))
 })

@@ -17,7 +17,7 @@ export const SCOPES = [
   'playlist-modify-public',
 ].join(' ')
 
-export type Tokens = { access: string; refresh: string; expiresAt: number }
+export type Tokens = { access: string; refresh: string; expiresAt: number; scope?: string }
 export type Pending = { verifier: string; state: string }
 export type SearchKind = 'track' | 'album' | 'artist' | 'playlist'
 

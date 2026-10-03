@@ -161,7 +161,10 @@ export function isSafeImageUrl(url: string): boolean {
   return /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._\/-]+$/.test(url)
 }
 
-/** Downloads `url`, scales it to size×size and prints RRGGBB per pixel, row-major. */
+/**
+ * Downloads `url`, scales it to size×size and prints RRGGBB per pixel,
+ * row-major; then, on a second line, the downloaded file as base64.
+ */
 export function artScript(url: string, size: number): string {
   return [
     'Add-Type -AssemblyName System.Drawing',
@@ -176,6 +179,7 @@ export function artScript(url: string, size: number): string {
     "  $c = $bmp.GetPixel($x, $y); [void]$sb.Append($c.R.ToString('x2') + $c.G.ToString('x2') + $c.B.ToString('x2'))",
     '} }',
     '$sb.ToString()',
+    '[Convert]::ToBase64String($bytes)',
   ].join('\n')
 }
 
@@ -297,8 +301,6 @@ export function recapCard(entries: readonly RecapEntry[], now: number): string {
 
 // ---------- desktop drawings (Svg) ----------
 
-const hex6 = (c: number) => `#${(c & 0xffffff).toString(16).padStart(6, '0')}`
-
 /** Album art as an SVG of square pixels, for surfaces without Raster. */
 export function artSvg(hex: string, size: number, px: number): string {
   const rects: string[] = []
@@ -311,28 +313,19 @@ export function artSvg(hex: string, size: number, px: number): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size * px}" height="${size * px}" shape-rendering="crispEdges">${rects.join('')}</svg>`
 }
 
-/** The visualizer as SVG bars that animate on their own (SMIL), for surfaces without Raster. */
-export function vizSvg(bars: number, seed: string, palette: readonly number[], isPlaying: boolean): string {
-  const lo = hex6(palette[0] ?? 0x1db954)
-  const hi = hex6(palette[1] ?? 0x1ed7a0)
-  const w = 8
-  const h = 60
-  const out: string[] = []
-  for (let i = 0; i < bars; i++) {
-    const p = hash(`${seed}:${i}`)
-    const tall = Math.round(h * (0.35 + 0.6 * p))
-    const short = Math.round(h * (0.1 + 0.2 * p))
-    const dur = (0.5 + p * 0.9).toFixed(2)
-    const anim = isPlaying
-      ? `<animate attributeName="height" values="${short};${tall};${short}" dur="${dur}s" repeatCount="indefinite"/><animate attributeName="y" values="${h - short};${h - tall};${h - short}" dur="${dur}s" repeatCount="indefinite"/>`
-      : ''
-    out.push(`<rect x="${i * (w + 2)}" y="${h - short}" width="${w}" height="${short}" rx="2" fill="url(#g)">${anim}</rect>`)
-  }
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${bars * (w + 2)} ${h}" width="${bars * (w + 2)}" height="${h}">` +
-    `<defs><linearGradient id="g" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="${lo}"/><stop offset="1" stop-color="${hi}"/></linearGradient></defs>` +
-    `${out.join('')}</svg>`
-  )
+/** The largest SVG a surface takes (`SvgProps.source`). */
+export const SVG_MAX = 131_072
+
+/**
+ * The real cover, embedded as a JPEG with rounded corners, `px` CSS pixels
+ * square; undefined when it would not fit in one SVG.
+ */
+export function coverSvg(jpegBase64: string, px: number): string | undefined {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${px}" height="${px}">` +
+    `<defs><clipPath id="r"><rect width="100" height="100" rx="6"/></clipPath></defs>` +
+    `<image href="data:image/jpeg;base64,${jpegBase64}" width="100" height="100" preserveAspectRatio="xMidYMid slice" clip-path="url(#r)"/></svg>`
+  return svg.length <= SVG_MAX ? svg : undefined
 }
 
 // ---------- host helpers (Windows PowerShell) ----------

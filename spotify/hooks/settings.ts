@@ -69,7 +69,7 @@ export const SETTINGS: readonly SettingDef[] = [
     key: 'art', group: 'Player', label: 'Album art', help: 'Cover size in the Player tab.', default: 'medium',
     options: [{ value: 'small', label: 'Small' }, { value: 'medium', label: 'Medium' }, { value: 'large', label: 'Large' }, { value: 'off', label: 'Off' }],
   },
-  { key: 'visualizer', group: 'Player', label: 'Visualizer', help: "Animated bars in the cover's colors (decorative).", options: ONOFF, default: 'on' },
+  { key: 'visualizer', group: 'Player', label: 'Visualizer', help: "Animated bars in the cover's colors (decorative; terminal only).", options: ONOFF, default: 'on' },
   {
     key: 'vizHeight', group: 'Player', label: 'Visualizer height', help: 'Rows of bars.', default: '5',
     options: [{ value: '3', label: '3 rows' }, { value: '5', label: '5 rows' }, { value: '8', label: '8 rows' }],

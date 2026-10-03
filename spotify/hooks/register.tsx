@@ -56,6 +56,7 @@ import {
   artScript,
   soundScript,
   artSvg,
+  coverSvg,
   basename,
   chimeScript,
   hhmm,
@@ -70,7 +71,6 @@ import {
   recapStats,
   recapText,
   vizCells,
-  vizSvg,
 } from './media'
 import { decodeJpegEighth, resampleHex } from './jpeg'
 import {
@@ -183,6 +183,8 @@ let lastShared = ''
 let paneColumns = 80
 let noticeSeq = 0
 const artCache = new Map<string, { cells: string; palette: number[]; pixels: string }>()
+// the downloaded cover as base64, by URL: the desktop app shows the real image (kept here, not in the session's state)
+const coverJpeg = new Map<string, string>()
 const lyricsCache = new Map<string, SpotifyLyrics>()
 
 /** Fire-and-forget: background work reports through `notice`, never as an unhandled rejection. */
@@ -931,8 +933,13 @@ async function loadArt($: Engine, url: string) {
   if (artLoading === key || !isSafeImageUrl(url)) return
   artLoading = key
   try {
-    const hex = (await isWindows($)) ? await artViaPowerShell($, url, size) : await artViaCurl($, url, size)
+    const got = (await isWindows($)) ? await artViaPowerShell($, url, size) : await artViaCurl($, url, size)
+    const hex = got?.hex
     if (hex?.length !== size * size * 6) return
+    if (got?.jpeg) {
+      coverJpeg.set(url, got.jpeg)
+      if (coverJpeg.size > 20) coverJpeg.delete(coverJpeg.keys().next().value!)
+    }
     const drawn = { cells: artCells(hex, size, size), palette: paletteFrom(hex), pixels: hex }
     artCache.set(key, drawn)
     if ((await read($, player))?.imageUrl === url) {
@@ -944,15 +951,19 @@ async function loadArt($: Engine, url: string) {
   }
 }
 
-/** Windows: PowerShell downloads and scales the cover. */
-async function artViaPowerShell($: Engine, url: string, size: number): Promise<string | undefined> {
+type FetchedArt = { hex: string; jpeg?: string }
+
+/** Windows: PowerShell downloads and scales the cover, and hands back the file too. */
+async function artViaPowerShell($: Engine, url: string, size: number): Promise<FetchedArt | undefined> {
   const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', artScript(url, size)]
   const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 20_000 })
-  return exitCode === 0 ? stdout.trim() : undefined
+  if (exitCode !== 0) return undefined
+  const [hex = '', jpeg] = stdout.trim().split(/\s+/)
+  return { hex, jpeg }
 }
 
 /** macOS and Linux: curl downloads the cover to a temp file and the mod decodes the JPEG itself. */
-async function artViaCurl($: Engine, url: string, size: number): Promise<string | undefined> {
+async function artViaCurl($: Engine, url: string, size: number): Promise<FetchedArt | undefined> {
   const dir = ((await $.env.get('TMPDIR')) || '/tmp').replace(/\/+$/, '')
   const file = `${dir}/claude-spotify-art.jpg`
   const { exitCode } = await $.process.run(['curl', '-sfL', '--max-time', '15', '-o', file, url], { timeoutMs: 20_000 })
@@ -960,7 +971,7 @@ async function artViaCurl($: Engine, url: string, size: number): Promise<string 
   const got = await $.fs.read(file, { as: 'bytes' })
   if (typeof got === 'string') return undefined
   const img = decodeJpegEighth(Uint8Array.from(atob(got.base64), c => c.charCodeAt(0)))
-  return img ? resampleHex(img, size) : undefined
+  return img ? { hex: resampleHex(img, size), jpeg: got.base64 } : undefined
 }
 
 // ---------- actions (each resolves a line describing the outcome) ----------
@@ -2368,7 +2379,8 @@ ${SIDEBAR_TIP}` }
     const showArt = cover !== null && p !== null && cover.url === p.imageUrl && (width >= 50 || !drawsCells) && s.art !== 'off'
     const vizColumns = Math.min(VIZ_COLUMNS, width)
     const vizRows = Number(s.vizHeight ?? 5)
-    const showViz = p !== null && isOn(s, 'visualizer')
+    // the visualizer is a terminal thing: the desktop app shows the cover alone
+    const showViz = p !== null && isOn(s, 'visualizer') && drawsCells
 
     const info = p ? (
       <Box flexDirection="column" flexShrink={1}>
@@ -2390,13 +2402,17 @@ ${SIDEBAR_TIP}` }
 
     let artElement = null
     if (showArt && drawsCells && 'Raster' in ui) artElement = <ui.Raster key="art" columns={cover.columns} rows={cover.rows} cells={cover.cells} />
-    else if (showArt && 'Svg' in ui) artElement = <ui.Svg source={artSvg(cover.pixels, cover.size, Math.max(3, Math.round(120 / cover.size)))} alt={`Cover of ${p.album}`} />
+    else if (showArt && 'Svg' in ui) {
+      const jpeg = coverJpeg.get(cover.url)
+      // the Album art setting sizes it here too: 96, 128 or 192 CSS pixels for small, medium, large
+      const px = artPixels(s) * 8
+      const source = (jpeg && coverSvg(jpeg, px)) || artSvg(cover.pixels, cover.size, Math.max(3, Math.round(px / cover.size)))
+      artElement = <ui.Svg source={source} alt={`Cover of ${p.album}`} />
+    }
 
     let vizElement = null
-    if (showViz && drawsCells && 'Raster' in ui) {
+    if (showViz && 'Raster' in ui) {
       vizElement = <ui.Raster key="viz" columns={vizColumns} rows={vizRows} cells={vizCells(vizColumns, vizRows, shownPos, p.id, cover?.palette ?? [], p.isPlaying ? 1 : 0)} />
-    } else if (showViz && 'Svg' in ui) {
-      vizElement = <ui.Svg source={vizSvg(24, p.id, cover?.palette ?? [], p.isPlaying)} alt="Visualizer" isInteractive />
     }
 
     return (

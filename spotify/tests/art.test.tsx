@@ -30,11 +30,12 @@ describe('album art decoder', () => {
   })
 })
 
-test('the desktop app gets the cover and the visualizer as SVG, at any width; the terminal gets cells', async ($, on) => {
+test('the desktop app gets the real cover, sized by the setting and no visualizer; the terminal gets cells', async ($, on) => {
   fakeSpotify(on, undefined, 'premium', undefined, {
     player: { item: { type: 'track', id: 't1', uri: 'spotify:track:t1', name: 'Around the World', duration_ms: 180_000, artists: [{ name: 'Daft Punk' }], album: { name: 'Homework', images: [{ url: 'https://i.scdn.co/image/cover300', width: 300 }] } } },
   })
-  on('process.run', () => ({ value: { exitCode: 0, stdout: 'ff0000'.repeat(16 * 16), stderr: '' } }) as never)
+  // PowerShell prints the scaled pixels, then the file itself as base64
+  on('process.run', () => ({ value: { exitCode: 0, stdout: `${'ff0000'.repeat(16 * 16)}\n${BASELINE}`, stderr: '' } }) as never)
   await $.command.run({ command: 'spotify', args: 'now' } as never)
   // the cover arrives in the background
   for (let i = 0; i < 10; i++) {
@@ -46,11 +47,23 @@ test('the desktop app gets the cover and the visualizer as SVG, at any width; th
   }
   for (const bodyColumns of [80, 34]) {
     const pane = await $.ui.mount({ plugin: 'spotify', surface: 'desktop', component: 'Pane', requestId: 'spotify', props: { ...(PANE_PROPS as object), bodyColumns } as never })
-    const svgs = (await pane.findAll({ type: 'Svg' })).map(x => (x.props as { alt: string }).alt)
-    expect(svgs).toEqual(['Cover of Homework', 'Visualizer'])
+    const svgs = await pane.findAll({ type: 'Svg' })
+    expect(svgs.map(x => (x.props as { alt: string }).alt)).toEqual(['Cover of Homework'])
+    expect((svgs[0]!.props as { source: string }).source).toContain(`<image href="data:image/jpeg;base64,${BASELINE}"`)
+    expect((svgs[0]!.props as { source: string }).source).toContain('width="128"')
     expect(await pane.find({ type: 'Raster' })).toBeUndefined()
     await pane.unmount()
   }
+  await $.command.run({ command: 'spotify', args: 'set art large' } as never)
+  for (let i = 0; i < 10; i++) {
+    const probe = await $.ui.mount({ plugin: 'spotify', surface: 'desktop', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
+    const source = ((await probe.find({ type: 'Svg' }))?.props as { source?: string } | undefined)?.source ?? ''
+    await probe.unmount()
+    if (source.includes('width="192"')) break
+    if (i === 9) expect(source).toContain('width="192"')
+    await settle($)
+  }
+  await $.command.run({ command: 'spotify', args: 'set art medium' } as never)
   const terminal = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'Pane', requestId: 'spotify', props: PANE_PROPS })
   expect(await terminal.find({ key: 'art' })).toBeDefined()
   expect(await terminal.find({ type: 'Svg' })).toBeUndefined()

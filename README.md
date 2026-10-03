@@ -136,6 +136,15 @@ Sound settings have a **▶ test** button on the settings page. None of the soun
 
 Pane hotkeys: `1`–`6` switch tabs. Player: `p` play/pause, `n` next, `b` back, `u`/`d` volume, `s` shuffle, `r` repeat, `l` like. Lyrics: `z` earlier, `x` later, `c` reset. DJ: `j` spin a set, `a` autopilot. Recap: `p` play all, `v` save as playlist, `y` copy summary. Library: `q` playlists, `w` Liked Songs, `e` recently played.
 
+## Pane beside the conversation or above the prompt
+
+Claude Code decides where the pane goes, not the mod:
+
+- **Beside the conversation, on the right:** Claude Code's fullscreen layout, with the terminal at least 110 columns wide.
+- **Above the prompt:** the default layout, or a narrower terminal.
+
+If the pane opens above the prompt and you want it on the side, run `/tui fullscreen`, or set `"tui": "fullscreen"` in `~/.claude/settings.json` and restart Claude Code. Then widen the window if needed and run `/spotify` again. To get the inline pane back, use `/tui default`.
+
 ## Privacy and security
 
 - Your client ID and login are stored by Claude Code in the plugin's store under your Claude configuration directory, never in this repository. On Windows the refresh token is encrypted with DPAPI for your user account (passed to PowerShell on stdin, never on a command line), and the short-lived access token is kept in memory only. `/spotify logout` deletes it all.

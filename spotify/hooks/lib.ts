@@ -52,7 +52,7 @@ const LRM = '\u200E'
  * a Hebrew or Arabic name keeps its left-to-right order.
  */
 export function clean(text: string): string {
-  const plain = String(text ?? '').replace(PICTOGRAPHS, '').replace(/\s{2,}/g, ' ').trim()
+  const plain = String(text ?? '').replace(PICTOGRAPHS, '').replace(/\u200E/g, '').replace(/\s{2,}/g, ' ').trim()
   return RTL.test(plain) ? LRM + plain : plain
 }
 

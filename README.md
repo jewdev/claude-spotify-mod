@@ -14,7 +14,7 @@ A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that 
   4. **Recap**: every track played this session next to what Claude was doing meanwhile (files edited, tool calls, tests going red or green), with stats: minutes listened, top artist, your most productive track. Play any row, play it all, save it as a playlist, or copy a summary card.
   5. **Library**: your playlists, Liked Songs and recently played, one press to play.
   6. **Settings**: every option below, grouped, with a picker for each.
-- **Chimes**: a short sound when a long turn ends, and (if you turn it on) when Claude is waiting on a permission prompt or a question. The music is never touched.
+- **Sounds**: a sound of your choice (chime, bell, ding, marimba, pop, or Windows' own) when Claude finishes a turn, when it's waiting on you, and when a focus block ends, at its own volume. The music is never touched.
 - **Focus timer**: `/spotify focus 25` shows a countdown above the prompt, then a break timer. It doesn't start, pause or queue anything.
 - **Tools Claude can call**: `now_playing`, `control`, `play`, `search`, `queue`, `devices`. Try asking "play something calm while we debug this". Opt in, and Claude is also told what's playing when the track changed.
 
@@ -80,25 +80,37 @@ Open the **Settings** tab (`/spotify settings`, or `6` in the pane), or use `/sp
 
 | Group | Key | Options (default first) | What it does |
 | --- | --- | --- | --- |
-| General | `band` | on, off | The now-playing row above the prompt |
-| | `bandLyrics` | on, off | The line being sung, under the band |
+| General | `accent` | green, blue, purple, orange, pink, white | Color of titles, highlights and success lines |
+| | `defaultTab` | player, lyrics, dj, recap, library, last | The tab `/spotify` opens |
+| | `statusLine` | on, off | The track in the status line |
 | | `trackToasts` | on, off | A toast when the track changes |
 | | `noticeFade` | 6, 3, 10, never | Seconds before pane messages fade |
 | | `polling` | smart, fast, saver | Smart: every 3 s while playing, every second near a track's end, every 10 s when paused |
+| Band | `band` | on, off | The now-playing row above the prompt |
+| | `bandControls` | on, off | ⏮ ⏯ ⏭ ♥ ☰ in the band |
+| | `bandTime` | on, off | Position and length in the band |
+| | `bandLyrics` | on, off | The line being sung, under the band |
 | Player | `art` | medium, small, large, off | Cover size: 16, 12 or 24 pixels a side |
 | | `visualizer` | on, off | The animated bars |
+| | `vizHeight` | 5, 3, 8 | Rows of bars |
+| | `showSearch` · `showUpNext` · `showDevices` | on, off | Sections of the Player tab |
 | | `lyrics` | on, off | Fetch lyrics from LRCLIB |
-| DJ | `autopilot` | off, on | Re-pick every few turns (Premium) |
+| Sounds | `doneSound` | chime, bell, ding, marimba, pop, system, off | When Claude finishes a turn |
+| | `doneAfter` | 60, every turn, 30, 120, 300 | Only for turns at least this many seconds long |
+| | `waitingSound` | off, chime, bell, ding, marimba, pop, system | When a permission prompt or a question waits for you |
+| | `focusSound` | bell, chime, ding, marimba, pop, system, off | When a focus block or a break ends |
+| | `soundVolume` | 75, 25, 50, 100 | Volume of these sounds (not the music) |
+| DJ | `autopilot` | off, on | Re-pick music every few turns (Premium) |
+| | `djTurns` | 4, 3, 6, 10 | Turns between autopilot picks |
 | | `djEvents` | on, off | React to tests failing and passing |
 | | `djLearns` | on, off | Remember DJ picks you skip (under 30 s) or like |
 | | `djCount` | 6, 4, 10 | Tracks per set |
-| Cues | `doneCue` | chime, off | A chime when a long turn ends |
-| | `doneAfter` | 60, 30, 120, 300 | Seconds a turn must take to cue |
-| | `waitingCue` | off, chime | A chime when a permission prompt or a question waits for you |
 | Focus | `focusLength` | 25, 15, 50, 90 | Minutes per focus block |
 | | `breakLength` | 5, 0, 10, 15 | Minutes of break timer after it |
 | Claude | `shareNowPlaying` | off, on | A short note with your next prompt when the track changed |
 | Privacy | `protectTokens` | on, off | Encrypt the saved login with Windows DPAPI |
+
+Sound settings have a **▶ test** button on the settings page. None of the sounds or timers change what's playing: only the DJ and the buttons you press do.
 
 ## Commands
 

@@ -349,6 +349,21 @@ export const DPAPI_UNPROTECT = [
 ].join('; ')
 
 /** A short system sound: `done` or `waiting`. */
+/** Plays a .wav at `volume` (0..1) through Windows' media player, then waits for it to finish. */
+export function soundScript(path: string, volume: number): string {
+  const quoted = path.replace(/'/g, "''")
+  return [
+    'Add-Type -AssemblyName PresentationCore',
+    '$p = New-Object System.Windows.Media.MediaPlayer',
+    `$p.Open([Uri]'${quoted}')`,
+    `$p.Volume = ${Math.max(0, Math.min(1, volume)).toFixed(2)}`,
+    'Start-Sleep -Milliseconds 150',
+    '$p.Play()',
+    'Start-Sleep -Milliseconds 1400',
+    '$p.Close()',
+  ].join('; ')
+}
+
 export function chimeScript(kind: 'done' | 'waiting'): string {
   const sound = kind === 'done' ? 'Asterisk' : 'Exclamation'
   return `[System.Media.SystemSounds]::${sound}.Play(); Start-Sleep -Milliseconds 700`

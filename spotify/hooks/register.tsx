@@ -44,6 +44,7 @@ import {
   DPAPI_UNPROTECT,
   artCells,
   artScript,
+  soundScript,
   artSvg,
   basename,
   chimeScript,
@@ -64,8 +65,14 @@ import {
 import {
   DEFAULT_SETTINGS,
   EMPTY_TASTE,
+  ACCENTS,
+  GROUP_INFO,
   SETTINGS,
+  accentOf,
+  changedIn,
+  isToggle,
   artPixels,
+  earnsDoneSound,
   clockLeft,
   findSetting,
   matchOption,
@@ -85,7 +92,6 @@ const PANE = 'spotify'
 const TICK_MS = 250
 const VIZ_MS = 100
 const VIZ_COLUMNS = 40
-const VIZ_ROWS = 5
 const GREEN = '#1DB954'
 const FLASH_MS = 12_000
 const SKIP_MS = 30_000
@@ -205,6 +211,28 @@ async function isWindows($: Engine): Promise<boolean> {
   return (await $.env.get('OS')) === 'Windows_NT'
 }
 
+// ---------- saved state from older versions ----------
+
+function cleanItem(x: SpotifyItem): SpotifyItem {
+  return { ...x, title: clean(x.title), subtitle: clean(x.subtitle) }
+}
+
+/**
+ * Lists saved in the session's state survive a reload as they were fetched;
+ * run them through `clean` so names from before it existed (emoji, unmarked
+ * right-to-left text) stop throwing the pane's rows out of line.
+ */
+async function cleanSavedState($: Engine) {
+  await update($, library, l => ({ ...l, items: l.items.map(cleanItem) }))
+  await update($, results, list => list.map(cleanItem))
+  await update($, upNext, list => list.map(cleanItem))
+  await update($, dj, d => ({ ...d, picks: d.picks.map(cleanItem) }))
+  await update($, devices, list => list.map(d => ({ ...d, name: clean(d.name) })))
+  await update($, recap, list => list.map(e => ({ ...e, title: clean(e.title), artists: clean(e.artists) })))
+  await update($, player, p => (p ? { ...p, title: clean(p.title), artists: clean(p.artists), album: clean(p.album), device: clean(p.device) } : p))
+  await update($, lyrics, l => (l ? { ...l, lines: l.lines.map(x => ({ ...x, text: clean(x.text) })) } : l))
+}
+
 // ---------- settings ----------
 
 async function loadSettings($: Engine) {
@@ -229,6 +257,10 @@ async function setSetting($: Engine, key: string, raw: string): Promise<string> 
   await update($, settings, () => cfg)
   await $.store.set('settings', cfg)
   if (def.key === 'protectTokens' && before.protectTokens !== value) quiet(resaveTokens($))
+  if (def.key === 'statusLine') {
+    const p = await read($, player)
+    $.ui.status(p && value === 'on' ? `${p.isPlaying ? '♫' : '⏸'} ${p.title} — ${p.artists}` : undefined)
+  }
   if (def.key === 'art' && before.art !== value) {
     const p = await read($, player)
     if (p) quiet(loadArt($, p.imageUrl))
@@ -238,6 +270,14 @@ async function setSetting($: Engine, key: string, raw: string): Promise<string> 
     if (p) quiet(loadLyrics($, p))
   }
   return `${def.label}: ${optionLabel(def, value)}.`
+}
+
+async function resetGroup($: Engine, group: string): Promise<string> {
+  const defaults = Object.fromEntries(SETTINGS.filter(d => d.group === group).map(d => [d.key, d.default]))
+  cfg = { ...cfg, ...defaults }
+  await update($, settings, () => cfg)
+  await $.store.set('settings', cfg)
+  return `${group} settings reset to their defaults.`
 }
 
 async function resetSettings($: Engine): Promise<string> {
@@ -633,7 +673,7 @@ async function refresh($: Engine, deep: boolean): Promise<SpotifyPlayer | null> 
     }
     if (changed && now) quiet(onTrackChange($, now, prev))
     if (changed && isOn(cfg, 'trackToasts') && now?.isPlaying && prev !== null) $.ui.toast(`♫ ${now.title} — ${now.artists}`)
-    $.ui.status(now ? `${now.isPlaying ? '♫' : '⏸'} ${now.title} — ${now.artists}` : undefined)
+    $.ui.status(now && isOn(cfg, 'statusLine') ? `${now.isPlaying ? '♫' : '⏸'} ${now.title} — ${now.artists}` : undefined)
     return now
   } catch (err) {
     if (err instanceof SpotifyError && err.reason === 'not_logged_in') await update($, authed, () => false)
@@ -704,7 +744,7 @@ async function vizFrame($: Engine) {
   vizEnergy = target > vizEnergy ? Math.min(1, vizEnergy + 0.2) : Math.max(0, vizEnergy - 0.1)
   const a = await read($, art)
   const columns = Math.min(VIZ_COLUMNS, paneColumns)
-  const cells = vizCells(columns, VIZ_ROWS, await positionNow($, p), p.id, a?.palette ?? [], vizEnergy)
+  const cells = vizCells(columns, Number(cfg.vizHeight ?? 5), await positionNow($, p), p.id, a?.palette ?? [], vizEnergy)
   try {
     await $.ui.blit({ requestId: PANE, key: 'viz', cells })
   } catch {}
@@ -997,25 +1037,37 @@ async function pressLogout($: Engine) {
 
 // ---------- cues: when Claude finishes, or needs you (sounds only: the music is left alone) ----------
 
-async function chime($: Engine, kind: 'done' | 'waiting') {
-  if (await isWindows($)) {
-    try {
-      await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', chimeScript(kind)], { timeoutMs: 5000 })
-    } catch {}
-    return
-  }
+/** Plays one of the mod's sounds (or Windows' own) at the volume the settings give; `off` plays nothing. */
+async function playSound($: Engine, sound: string, kind: 'done' | 'waiting') {
+  if (!sound || sound === 'off') return
+  const volume = Number(cfg.soundVolume ?? 75) / 100
+  const windows = await isWindows($)
   try {
-    await $.audio.play({ asset: 'assets/chime.wav' })
+    if (windows && sound === 'system') {
+      await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', chimeScript(kind)], { timeoutMs: 5000 })
+    } else if (windows) {
+      const path = `${$.plugin.root}\\assets\\${sound}.wav`
+      await $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', soundScript(path, volume)], { timeoutMs: 8000 })
+    } else {
+      await $.audio.play({ asset: `assets/${sound === 'system' ? 'chime' : sound}.wav` }, { gain: volume })
+    }
   } catch {}
 }
 
-async function doneCue($: Engine) {
-  if (cfg.doneCue === 'chime') await chime($, 'done')
+async function waitingCue($: Engine) {
+  await playSound($, cfg.waitingSound ?? 'off', 'waiting')
 }
 
-async function waitingCue($: Engine) {
-  if (cfg.waitingCue === 'chime') await chime($, 'waiting')
+/** The settings page's "test" button: plays the sound a setting names right now. */
+async function testSound($: Engine, key: string) {
+  const sound = cfg[key] ?? 'off'
+  if (sound === 'off') {
+    await say($, 'That sound is off. Pick one to hear it.')
+    return
+  }
+  await playSound($, sound, key === 'waitingSound' ? 'waiting' : 'done')
 }
+
 
 // ---------- focus timer ----------
 
@@ -1046,7 +1098,7 @@ async function focusTick($: Engine) {
   if (left > 0) return
   if (f.phase === 'focus') {
     const breakMin = Number(cfg.breakLength ?? 0)
-    quiet(chime($, 'done'))
+    quiet(playSound($, cfg.focusSound ?? 'bell', 'done'))
     if (breakMin > 0) {
       const breakBlock: SpotifyFocus = { phase: 'break', endsAt: (await $.clock.now()) + breakMin * 60_000, minutes: breakMin }
       await update($, focus, () => breakBlock)
@@ -1058,7 +1110,7 @@ async function focusTick($: Engine) {
     return
   }
   await update($, focus, () => null)
-  quiet(chime($, 'waiting'))
+  quiet(playSound($, cfg.focusSound ?? 'bell', 'waiting'))
   await flashGreen($, '✓ Break over. /spotify focus starts another block.')
 }
 
@@ -1446,7 +1498,7 @@ async function runCommand($: Engine, args: string): Promise<string> {
     case '':
     case 'pane':
     case 'open':
-      await openPane($, undefined)
+      await openPane($, cfg.defaultTab && cfg.defaultTab !== 'last' ? (cfg.defaultTab as SpotifyTab) : undefined)
       return (await hasTokens($)) ? 'Spotify pane opened.' : 'Spotify pane opened. Run /spotify login to connect.'
     case 'help':
       return USAGE
@@ -1582,6 +1634,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await loadSettings($)
+    await cleanSavedState($)
     await $.command.register({
       name: 'spotify',
       description: 'Spotify: player, lyrics, Claude DJ, focus timer, recap, library and settings',
@@ -1621,9 +1674,9 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     if (e.agentId) return done
-    if (!e.isAborted && e.durationMs >= Number(cfg.doneAfter ?? 60) * 1000) quiet(doneCue($))
+    if (earnsDoneSound(cfg, e.durationMs, e.isAborted)) quiet(playSound($, cfg.doneSound ?? 'chime', 'done'))
     turnsSinceDj += 1
-    const due = turnsSinceDj >= 4 || turnFailures >= 3
+    const due = turnsSinceDj >= Number(cfg.djTurns ?? 4) || turnFailures >= 3
     const p = await read($, player)
     const free = (await read($, premium)) === false
     if (due && !free && p?.isPlaying && !djRunning && isOn(cfg, 'autopilot')) quiet(runDj($, 'autopilot', ''))
@@ -1696,6 +1749,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'CommandOutput', props: { command: 'spotify' } }, async ($, e, next) => {
     if (!e.props.text.startsWith('✓')) return next(e)
     const { Text } = $.ui.resolve(e)
+    const GREEN = accentOf(await read($, settings))
     return (
       <Text color={GREEN} wrap="wrap">
         {e.props.text}
@@ -1707,6 +1761,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const s = await read($, settings)
+    const GREEN = accentOf(s)
     const shout = await read($, flash)
     const f = await read($, focus)
     const left = f ? await read($, focusLeft) : 0
@@ -1741,12 +1796,12 @@ export const register: Register = (on, options) => {
                 <Text dimColor> — {p.artists}</Text>
               </Text>
             </Box>
-            {e.props.bodyColumns > 70 && <Text dimColor>{clock(p.progressMs)}/{clock(p.durationMs)}</Text>}
-            {canControl && <Button key="band-prev" label={busyText(busy, 'band-prev', '⏮', '…')} plain onPress={() => quiet(withBusy($, 'band-prev', () => back($)))} />}
-            {canControl && <Button key="band-toggle" label={busyText(busy, 'band-toggle', p.isPlaying ? '⏸' : '▶', '…')} plain onPress={() => quiet(withBusy($, 'band-toggle', () => toggle($)))} />}
-            {canControl && <Button key="band-next" label={busyText(busy, 'band-next', '⏭', '…')} plain onPress={() => quiet(withBusy($, 'band-next', () => skip($)))} />}
-            <Button key="band-like" label={busyText(busy, 'band-like', p.liked ? '♥' : '♡', '…')} plain onPress={() => quiet(withBusy($, 'band-like', () => like($, undefined)))} />
-            <Button key="band-open" label="☰" plain dimColor onPress={() => quiet(openPane($, undefined))} />
+            {isOn(s, 'bandTime') && e.props.bodyColumns > 70 && <Text dimColor>{clock(p.progressMs)}/{clock(p.durationMs)}</Text>}
+            {canControl && isOn(s, 'bandControls') && <Button key="band-prev" label={busyText(busy, 'band-prev', '⏮', '…')} plain onPress={() => quiet(withBusy($, 'band-prev', () => back($)))} />}
+            {canControl && isOn(s, 'bandControls') && <Button key="band-toggle" label={busyText(busy, 'band-toggle', p.isPlaying ? '⏸' : '▶', '…')} plain onPress={() => quiet(withBusy($, 'band-toggle', () => toggle($)))} />}
+            {canControl && isOn(s, 'bandControls') && <Button key="band-next" label={busyText(busy, 'band-next', '⏭', '…')} plain onPress={() => quiet(withBusy($, 'band-next', () => skip($)))} />}
+            {isOn(s, 'bandControls') && <Button key="band-like" label={busyText(busy, 'band-like', p.liked ? '♥' : '♡', '…')} plain onPress={() => quiet(withBusy($, 'band-like', () => like($, undefined)))} />}
+            {isOn(s, 'bandControls') && <Button key="band-open" label="☰" plain dimColor onPress={() => quiet(openPane($, undefined))} />}
           </Box>
         )}
         {line !== undefined && p?.isPlaying && (
@@ -1770,6 +1825,7 @@ export const register: Register = (on, options) => {
     const message = await read($, notice)
     const busy = await read($, busyKeys)
     const s = await read($, settings)
+    const GREEN = accentOf(s)
     const good = message.startsWith('✓')
     const messageLine = message !== '' && (
       <Text color={good ? GREEN : undefined} dimColor={!good} wrap="wrap">
@@ -2047,47 +2103,137 @@ export const register: Register = (on, options) => {
     if (current === 'settings') {
       const group = await read($, settingsGroup)
       const defs = SETTINGS.filter(d => d.group === group)
+      const labelWidth = Math.min(26, Math.max(...defs.map(d => d.label.length)) + 2)
+      const pick = (key: string, value: string) => quiet(setSetting($, key, value).then(t => say($, `✓ ${t}`)))
+
+      // a mock band from the current settings, so its switches show what they change
+      const sample = p ?? { title: 'Song title', artists: 'Artist', isPlaying: true, progressMs: 83_000, durationMs: 214_000, liked: false }
+      const sampleLine = (await currentLyric($)) ?? 'the line being sung'
+      const bandPreview = (
+        <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+          {isOn(s, 'band') ? (
+            <Box flexDirection="column">
+              <Text wrap="truncate-end">
+                <Text color={GREEN}>{sample.isPlaying ? '♫ ' : '⏸ '}</Text>
+                <Text bold>{sample.title}</Text>
+                <Text dimColor> — {sample.artists}</Text>
+                {isOn(s, 'bandTime') && <Text dimColor> {clock(sample.progressMs)}/{clock(sample.durationMs)}</Text>}
+                {isOn(s, 'bandControls') && <Text> ⏮ ⏸ ⏭ {sample.liked ? '♥' : '♡'} ☰</Text>}
+              </Text>
+              {isOn(s, 'bandLyrics') && (
+                <Text italic color={GREEN} dimColor wrap="truncate-end">
+                  {'  ♪ '}
+                  {sampleLine}
+                </Text>
+              )}
+            </Box>
+          ) : (
+            <Text dimColor>The band is hidden.</Text>
+          )}
+        </Box>
+      )
+
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
           <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-            {GROUPS.map(g => (
-              <Button key={`group-${g}`} label={g} plain dimColor={g !== group} onPress={() => quiet(showGroup($, g))} />
-            ))}
+            {GROUPS.map(g => {
+              const changed = changedIn(s, g)
+              return (
+                <Button
+                  key={`group-${g}`}
+                  label={changed ? `${g} •` : g}
+                  variant={g === group ? 'primary' : undefined}
+                  dimColor={g !== group}
+                  onPress={() => quiet(showGroup($, g))}
+                />
+              )
+            })}
           </Box>
+          <Box flexDirection="column">
+            <Text bold color={GREEN}>
+              {group}
+            </Text>
+            <Text dimColor wrap="wrap">
+              {GROUP_INFO[group] ?? ''}
+            </Text>
+          </Box>
+          {group === 'Band' && bandPreview}
           <Box flexDirection="column" gap={1}>
             {defs.map(d => {
               const value = s[d.key] ?? d.default
+              const changed = value !== d.default
+              let control
+              if (isToggle(d)) {
+                const enabled = value === 'on'
+                control = (
+                  <Button
+                    key={`set-${d.key}`}
+                    label={enabled ? '● On ' : '○ Off'}
+                    variant={enabled ? 'primary' : undefined}
+                    dimColor={!enabled}
+                    onPress={() => pick(d.key, enabled ? 'off' : 'on')}
+                  />
+                )
+              } else {
+                control = (
+                  <Box flexDirection="row" flexWrap="wrap" columnGap={1} flexShrink={1}>
+                    {d.options.map(o => {
+                      const chosen = o.value === value
+                      const swatch = d.key === 'accent' ? ACCENTS[o.value] : undefined
+                      return (
+                        <Box flexDirection="row">
+                          {swatch !== undefined && <Text color={swatch}>■</Text>}
+                          {chosen ? (
+                            <Button key={`set-${d.key}-${o.value}`} label={o.label} variant="primary" onPress={() => pick(d.key, o.value)} />
+                          ) : (
+                            <Button key={`set-${d.key}-${o.value}`} label={o.label} plain dimColor onPress={() => pick(d.key, o.value)} />
+                          )}
+                        </Box>
+                      )
+                    })}
+                    {d.isSound && (
+                      <Button
+                        key={`test-${d.key}`}
+                        label={busyText(busy, `test-${d.key}`, '▶ test', 'playing…')}
+                        plain
+                        onPress={() => quiet(withBusy($, `test-${d.key}`, () => testSound($, d.key)))}
+                      />
+                    )}
+                  </Box>
+                )
+              }
               return (
                 <Box flexDirection="column">
-                  {'Select' in ui ? (
-                    <ui.Select
-                      key={`set-${d.key}`}
-                      label={`${d.label}: `}
-                      options={d.options.map(o => ({ value: o.value, label: o.label }))}
-                      value={value}
-                      onSelect={v => quiet(setSetting($, d.key, v).then(t => say($, `✓ ${t}`)))}
-                    />
-                  ) : (
-                    <Button
-                      key={`set-${d.key}`}
-                      label={`${d.label}: ${optionLabel(d, value)}`}
-                      plain
-                      onPress={() => {
-                        const i = d.options.findIndex(o => o.value === value)
-                        const nextValue = d.options[(i + 1) % d.options.length]!.value
-                        quiet(setSetting($, d.key, nextValue).then(t => say($, `✓ ${t}`)))
-                      }}
-                    />
-                  )}
-                  <Text dimColor wrap="wrap">{'  '}{d.help}</Text>
+                  <Box flexDirection="row" columnGap={1}>
+                    <Box width={labelWidth} flexShrink={0}>
+                      <Text bold={changed} wrap="truncate-end">
+                        {d.label}
+                        {changed ? ' •' : ''}
+                      </Text>
+                    </Box>
+                    {control}
+                  </Box>
+                  <Text dimColor wrap="wrap">
+                    {d.help}
+                    {d.key === 'accent' ? ' ' : ''}
+                    {d.key === 'accent' && (
+                      <Text color={GREEN} bold>
+                        Preview: ♫ {sample.title}
+                      </Text>
+                    )}
+                  </Text>
                 </Box>
               )
             })}
           </Box>
-          <Box flexDirection="row" columnGap={1}>
-            <Button key="settings-reset" label="Reset to defaults" plain dimColor onPress={() => quiet(resetSettings($).then(t => say($, `✓ ${t}`)))} />
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            {changedIn(s, group) > 0 && (
+              <Button key="settings-reset-group" label={`Reset ${group}`} plain dimColor onPress={() => quiet(resetGroup($, group).then(t => say($, `✓ ${t}`)))} />
+            )}
+            <Button key="settings-reset" label="Reset all" plain dimColor onPress={() => quiet(resetSettings($).then(t => say($, `✓ ${t}`)))} />
           </Box>
+          <Text dimColor>• changed from the default · also /spotify set &lt;key&gt; &lt;value&gt;</Text>
           {messageLine}
         </Box>
       )
@@ -2103,6 +2249,7 @@ export const register: Register = (on, options) => {
     const line = await currentLyric($)
     const showArt = cover !== null && p !== null && cover.url === p.imageUrl && width >= 50 && s.art !== 'off'
     const vizColumns = Math.min(VIZ_COLUMNS, width)
+    const vizRows = Number(s.vizHeight ?? 5)
     const showViz = p !== null && isOn(s, 'visualizer')
 
     const info = p ? (
@@ -2129,7 +2276,7 @@ export const register: Register = (on, options) => {
 
     let vizElement = null
     if (showViz && 'Raster' in ui) {
-      vizElement = <ui.Raster key="viz" columns={vizColumns} rows={VIZ_ROWS} cells={vizCells(vizColumns, VIZ_ROWS, shownPos, p.id, cover?.palette ?? [], p.isPlaying ? 1 : 0)} />
+      vizElement = <ui.Raster key="viz" columns={vizColumns} rows={vizRows} cells={vizCells(vizColumns, vizRows, shownPos, p.id, cover?.palette ?? [], p.isPlaying ? 1 : 0)} />
     } else if (showViz && 'Svg' in ui) {
       vizElement = <ui.Svg source={vizSvg(24, p.id, cover?.palette ?? [], p.isPlaying)} alt="Visualizer" isInteractive />
     }
@@ -2169,7 +2316,7 @@ export const register: Register = (on, options) => {
 
         {messageLine}
 
-        {'Input' in ui && (
+        {'Input' in ui && isOn(s, 'showSearch') && (
           <ui.Input
             key="search"
             label="Search"
@@ -2206,7 +2353,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
 
-        {queue.length > 0 && (
+        {queue.length > 0 && isOn(s, 'showUpNext') && (
           <Box flexDirection="column">
             <Text bold>Up next</Text>
             {queue.map((x, i) => (
@@ -2217,6 +2364,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
 
+        {isOn(s, 'showDevices') && (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={1}>
             <Text bold>Devices</Text>
@@ -2234,6 +2382,7 @@ export const register: Register = (on, options) => {
               />
             ))}
         </Box>
+        )}
 
         <Box>
           <Button key="logout" label={busyText(busy, 'logout', 'log out', 'logging out…')} plain dimColor onPress={() => quiet(withBusy($, 'logout', () => pressLogout($)))} />

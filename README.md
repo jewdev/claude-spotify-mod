@@ -2,6 +2,8 @@
 
 A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that puts Spotify inside your coding session: a player pane with album art and a visualizer, time-synced lyrics, a Claude DJ that picks music for what you're working on, and a recap of the session's soundtrack.
 
+![The Spotify pane in Claude Code: album art, a visualizer, playback controls, up next and devices, with the now-playing band above the prompt](docs/screenshot.png)
+
 ## Features
 
 - **Now playing everywhere**: the track in the status line, a band above the prompt with ⏮ ⏯ ⏭ ♥ and the lyric being sung, and a toast when the track changes.

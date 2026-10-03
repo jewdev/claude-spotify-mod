@@ -71,6 +71,10 @@ const dj = atom({ plugin: 'spotify', key: 'dj' } as const, IDLE_DJ)
 const autopilot = atom({ plugin: 'spotify', key: 'autopilot' } as const, false)
 const recap = atom({ plugin: 'spotify', key: 'recap' } as const, [])
 const premium = atom({ plugin: 'spotify', key: 'premium' } as const, null)
+const busyKeys = atom({ plugin: 'spotify', key: 'busy' } as const, [])
+const flash = atom({ plugin: 'spotify', key: 'flash' } as const, '')
+const GREEN = '#1DB954'
+const FLASH_MS = 12_000
 
 const TOOL_NOW = 'mcp__spotify__now_playing'
 const TOOL_CONTROL = 'mcp__spotify__control'
@@ -102,6 +106,27 @@ const lyricsCache = new Map<string, SpotifyLyrics>()
 /** Fire-and-forget: background work reports through `notice`, never as an unhandled rejection. */
 function quiet(work: Promise<unknown>): void {
   work.catch(() => {})
+}
+
+/** Marks `key` busy while `work` runs, so its button can say what it is doing. */
+async function withBusy($: Engine, key: string, work: () => Promise<unknown>): Promise<void> {
+  await update($, busyKeys, keys => (keys.includes(key) ? keys : [...keys, key]))
+  try {
+    await work()
+  } finally {
+    await update($, busyKeys, keys => keys.filter(k => k !== key))
+  }
+}
+
+/** A button's label: `working` while its key is busy. */
+function busyText(busy: readonly string[], key: string, idle: string, working: string): string {
+  return busy.includes(key) ? working : idle
+}
+
+/** Shows `text` in green above the prompt for a few seconds. */
+async function flashGreen($: Engine, text: string) {
+  await update($, flash, () => text)
+  $.clock.after(FLASH_MS, () => quiet(update($, flash, f => (f === text ? '' : f))))
 }
 
 // ---------- auth ----------
@@ -268,7 +293,7 @@ async function connectedMessage($: Engine): Promise<string> {
 async function announceConnected($: Engine): Promise<string> {
   const text = await connectedMessage($)
   const hint = (await read($, player)) ? '' : ' Play something, then try /spotify.'
-  $.ui.log(`spotify: ${text}${hint}`)
+  await flashGreen($, text + hint)
   $.ui.toast(text, { timeoutMs: 8000 })
   await update($, notice, () => text)
   return text + hint
@@ -706,6 +731,7 @@ async function queueQuery($: Engine, raw: string) {
 }
 
 async function runSearch($: Engine, raw: string): Promise<SpotifyItem[]> {
+  await update($, notice, () => `Searching for "${raw.trim()}"…`)
   try {
     const { query, kind, explicit } = parseQuery(raw)
     const kinds: SearchKind[] = explicit ? [kind] : ['track', 'album', 'playlist']
@@ -1267,17 +1293,43 @@ export const register: Register = (on, options) => {
     return { result: transfer_to ? await useDevice($, transfer_to) : await listDevices($) }
   })
 
+  // A /spotify answer that reports success draws in green
+  on('ui.render', { component: 'CommandOutput', props: { command: 'spotify' } }, async ($, e, next) => {
+    if (!e.props.text.startsWith('✓')) return next(e)
+    const { Text } = $.ui.resolve(e)
+    return (
+      <Text color={GREEN} wrap="wrap">
+        {e.props.text}
+      </Text>
+    )
+  })
+
   // Now-playing band above the prompt, with the line being sung
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!showBand || e.props.hasSurvey) return next(e)
-    const p = await read($, player)
-    if (!p || (await read($, bandHidden))) return next(e)
+    if (e.props.hasSurvey) return next(e)
+    const shout = await read($, flash)
+    const player0 = showBand && !(await read($, bandHidden)) ? await read($, player) : null
+    if (!player0 && !shout) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
+    if (!player0) {
+      return (
+        <Text color={GREEN} bold wrap="wrap">
+          {shout}
+        </Text>
+      )
+    }
+    const p = player0
     const line = await currentLyric($)
     const canControl = (await read($, premium)) !== false
+    const busy = await read($, busyKeys)
 
     return (
       <Box flexDirection="column">
+        {shout !== '' && (
+          <Text color={GREEN} bold wrap="wrap">
+            {shout}
+          </Text>
+        )}
         <Box flexDirection="row" gap={1}>
           <Text color="#1DB954">{p.isPlaying ? '♫' : '⏸'}</Text>
           <Box flexShrink={1}>
@@ -1287,10 +1339,10 @@ export const register: Register = (on, options) => {
             </Text>
           </Box>
           {e.props.bodyColumns > 70 && <Text dimColor>{clock(p.progressMs)}/{clock(p.durationMs)}</Text>}
-          {canControl && <Button key="band-prev" label="⏮" plain onPress={() => quiet(back($))} />}
-          {canControl && <Button key="band-toggle" label={p.isPlaying ? '⏸' : '▶'} plain onPress={() => quiet(toggle($))} />}
-          {canControl && <Button key="band-next" label="⏭" plain onPress={() => quiet(skip($))} />}
-          <Button key="band-like" label={p.liked ? '♥' : '♡'} plain onPress={() => quiet(like($, undefined))} />
+          {canControl && <Button key="band-prev" label={busyText(busy, 'band-prev', '⏮', '…')} plain onPress={() => quiet(withBusy($, 'band-prev', () => back($)))} />}
+          {canControl && <Button key="band-toggle" label={busyText(busy, 'band-toggle', p.isPlaying ? '⏸' : '▶', '…')} plain onPress={() => quiet(withBusy($, 'band-toggle', () => toggle($)))} />}
+          {canControl && <Button key="band-next" label={busyText(busy, 'band-next', '⏭', '…')} plain onPress={() => quiet(withBusy($, 'band-next', () => skip($)))} />}
+          <Button key="band-like" label={busyText(busy, 'band-like', p.liked ? '♥' : '♡', '…')} plain onPress={() => quiet(withBusy($, 'band-like', () => like($, undefined)))} />
           <Button key="band-open" label="☰" plain dimColor onPress={() => quiet(openPane($, undefined))} />
         </Box>
         {line !== undefined && p.isPlaying && (
@@ -1311,6 +1363,8 @@ export const register: Register = (on, options) => {
     const height = e.viewport?.rows ?? 30
     const isAuthed = await read($, authed)
     const message = await read($, notice)
+    const busy = await read($, busyKeys)
+    const good = message.startsWith('✓')
 
     if (!isAuthed) {
       return (
@@ -1323,9 +1377,9 @@ export const register: Register = (on, options) => {
             <Text dimColor>3. Press Log in, or run /spotify login</Text>
           </Box>
           <Box>
-            <Button key="login" label="Log in" variant="primary" hotkey="l" onPress={() => quiet(pressLogin($))} />
+            <Button key="login" label={busyText(busy, 'login', 'Log in', 'Opening browser…')} variant="primary" hotkey="l" onPress={() => quiet(withBusy($, 'login', () => pressLogin($)))} />
           </Box>
-          {message !== '' && <Text color="yellow" wrap="wrap">{message}</Text>}
+          {message !== '' && <Text color={good ? GREEN : 'yellow'} wrap="wrap">{message}</Text>}
         </Box>
       )
     }
@@ -1425,7 +1479,7 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column">
               {d.picks.map((x, i) => (
                 <Box flexDirection="row" gap={1}>
-                  <Button key={`dj-play-${i}`} label={free ? '↗' : '▶'} plain onPress={() => quiet(playPick($, x))} />
+                  <Button key={`dj-play-${i}`} label={busyText(busy, `dj-play-${i}`, free ? '↗' : '▶', '…')} plain onPress={() => quiet(withBusy($, `dj-play-${i}`, () => playPick($, x)))} />
                   <Box flexShrink={1}>
                     <Text wrap="truncate-end">
                       {x.title}
@@ -1446,7 +1500,7 @@ export const register: Register = (on, options) => {
               ? 'Free account: the DJ saves its picks as a playlist and opens it in Spotify. /spotify dj <hint> steers it.'
               : 'Autopilot re-picks every few turns, and when tool calls start failing. /spotify dj <hint> steers it.'}
           </Text>
-          {message !== '' && <Text dimColor wrap="wrap">{message}</Text>}
+          {message !== '' && <Text color={good ? GREEN : undefined} dimColor={!good} wrap="wrap">{message}</Text>}
         </Box>
       )
     }
@@ -1461,7 +1515,7 @@ export const register: Register = (on, options) => {
           {tabs}
           <Text bold>Session soundtrack · {entries.length} track{entries.length === 1 ? '' : 's'}</Text>
           {entries.length === 0 && <Text dimColor>Tracks you play during this session show here, with what Claude was doing meanwhile.</Text>}
-          {message !== '' && <Text color="yellow" wrap="wrap">{message}</Text>}
+          {message !== '' && <Text color={good ? GREEN : 'yellow'} wrap="wrap">{message}</Text>}
           <Box flexDirection="column">
             {entries.length > shown.length && <Text dimColor>… {entries.length - shown.length} earlier</Text>}
             {shown.map(x => (
@@ -1477,7 +1531,7 @@ export const register: Register = (on, options) => {
             ))}
           </Box>
           <Box>
-            <Button key="recap-save" label="Save as playlist" hotkey="v" variant="primary" onPress={() => quiet(pressSave($))} />
+            <Button key="recap-save" label={busyText(busy, 'recap-save', 'Save as playlist', 'Saving…')} hotkey="v" variant="primary" onPress={() => quiet(withBusy($, 'recap-save', () => pressSave($)))} />
           </Box>
         </Box>
       )
@@ -1538,33 +1592,33 @@ export const register: Register = (on, options) => {
         {free ? (
           <Box flexDirection="column">
             <Box flexDirection="row" columnGap={1}>
-              <Button key="like" label={p?.liked ? '♥ liked' : '♡ like'} hotkey="l" onPress={() => quiet(like($, undefined))} />
+              <Button key="like" label={busyText(busy, 'like', p?.liked ? '♥ liked' : '♡ like', '♥ saving…')} hotkey="l" onPress={() => quiet(withBusy($, 'like', () => like($, undefined)))} />
             </Box>
             <Text dimColor wrap="wrap">Free account: play, pause and skip in the Spotify app. ↗ opens a track there.</Text>
           </Box>
         ) : (
         <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-          <Button key="prev" label="⏮ prev" hotkey="b" onPress={() => quiet(back($))} />
-          <Button key="toggle" label={p?.isPlaying ? '⏸ pause' : '▶ play'} hotkey="p" variant="primary" onPress={() => quiet(toggle($))} />
-          <Button key="next" label="⏭ next" hotkey="n" onPress={() => quiet(skip($))} />
-          <Button key="voldown" label="vol −" hotkey="d" onPress={() => quiet(volumeBy($, -10))} />
-          <Button key="volup" label="vol +" hotkey="u" onPress={() => quiet(volumeBy($, 10))} />
-          <Button key="shuffle" label={p?.shuffle ? 'shuffle on' : 'shuffle off'} hotkey="s" onPress={() => quiet(toggleShuffle($))} />
-          <Button key="repeat" label={`repeat ${p?.repeat ?? 'off'}`} hotkey="r" onPress={() => quiet(cycleRepeat($))} />
-          <Button key="like" label={p?.liked ? '♥ liked' : '♡ like'} hotkey="l" onPress={() => quiet(like($, undefined))} />
+          <Button key="prev" label={busyText(busy, 'prev', '⏮ prev', '⏮ …')} hotkey="b" onPress={() => quiet(withBusy($, 'prev', () => back($)))} />
+          <Button key="toggle" label={busyText(busy, 'toggle', p?.isPlaying ? '⏸ pause' : '▶ play', p?.isPlaying ? '⏸ pausing…' : '▶ starting…')} hotkey="p" variant="primary" onPress={() => quiet(withBusy($, 'toggle', () => toggle($)))} />
+          <Button key="next" label={busyText(busy, 'next', '⏭ next', '⏭ skipping…')} hotkey="n" onPress={() => quiet(withBusy($, 'next', () => skip($)))} />
+          <Button key="voldown" label={busyText(busy, 'voldown', 'vol −', 'vol …')} hotkey="d" onPress={() => quiet(withBusy($, 'voldown', () => volumeBy($, -10)))} />
+          <Button key="volup" label={busyText(busy, 'volup', 'vol +', 'vol …')} hotkey="u" onPress={() => quiet(withBusy($, 'volup', () => volumeBy($, 10)))} />
+          <Button key="shuffle" label={busyText(busy, 'shuffle', p?.shuffle ? 'shuffle on' : 'shuffle off', 'shuffle …')} hotkey="s" onPress={() => quiet(withBusy($, 'shuffle', () => toggleShuffle($)))} />
+          <Button key="repeat" label={busyText(busy, 'repeat', `repeat ${p?.repeat ?? 'off'}`, 'repeat …')} hotkey="r" onPress={() => quiet(withBusy($, 'repeat', () => cycleRepeat($)))} />
+          <Button key="like" label={busyText(busy, 'like', p?.liked ? '♥ liked' : '♡ like', '♥ saving…')} hotkey="l" onPress={() => quiet(withBusy($, 'like', () => like($, undefined)))} />
         </Box>
         )}
 
-        {message !== '' && <Text dimColor wrap="wrap">{message}</Text>}
+        {message !== '' && <Text color={good ? GREEN : undefined} dimColor={!good} wrap="wrap">{message}</Text>}
 
         {'Input' in ui && (
           <ui.Input
             key="search"
             label="Search"
             placeholder="song · artist: … · album: … · playlist: …"
-            submitLabel="Search"
+            submitLabel={busyText(busy, 'search', 'Search', 'Searching…')}
             onSubmit={value => {
-              if (value.trim()) quiet(runSearch($, value))
+              if (value.trim()) quiet(withBusy($, 'search', () => runSearch($, value)))
             }}
           />
         )}
@@ -1577,9 +1631,9 @@ export const register: Register = (on, options) => {
             </Box>
             {found.map((x, i) => (
               <Box flexDirection="row" gap={1}>
-                <Button key={`play-${i}`} label={free ? '↗' : '▶'} plain onPress={() => quiet(playPick($, x))} />
+                <Button key={`play-${i}`} label={busyText(busy, `play-${i}`, free ? '↗' : '▶', '…')} plain onPress={() => quiet(withBusy($, `play-${i}`, () => playPick($, x)))} />
                 {x.kind === 'track' && !free ? (
-                  <Button key={`queue-${i}`} label="+" plain dimColor onPress={() => quiet(enqueue($, x.uri, `"${x.title}"`))} />
+                  <Button key={`queue-${i}`} label={busyText(busy, `queue-${i}`, '+', '…')} plain dimColor onPress={() => quiet(withBusy($, `queue-${i}`, () => enqueue($, x.uri, `"${x.title}"`)))} />
                 ) : (
                   <Text> </Text>
                 )}
@@ -1608,22 +1662,22 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Box flexDirection="row" gap={1}>
             <Text bold>Devices</Text>
-            <Button key="load-devices" label="refresh" plain dimColor onPress={() => quiet(loadDevices($))} />
+            <Button key="load-devices" label={busyText(busy, 'load-devices', 'refresh', 'refreshing…')} plain dimColor onPress={() => quiet(withBusy($, 'load-devices', () => loadDevices($)))} />
           </Box>
           {free && devs.map(d => <Text dimColor={!d.isActive}>{`${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`}</Text>)}
           {!free && devs.map((d, i) => (
             <Button
               key={`dev-${i}`}
-              label={`${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`}
+              label={busyText(busy, `dev-${i}`, `${d.isActive ? '▶ ' : '  '}${d.name} (${d.type})`, `  moving playback to ${d.name}…`)}
               plain
               dimColor={!d.isActive}
-              onPress={() => quiet(useDevice($, d.id))}
+              onPress={() => quiet(withBusy($, `dev-${i}`, () => useDevice($, d.id)))}
             />
           ))}
         </Box>
 
         <Box>
-          <Button key="logout" label="log out" plain dimColor onPress={() => quiet(pressLogout($))} />
+          <Button key="logout" label={busyText(busy, 'logout', 'log out', 'logging out…')} plain dimColor onPress={() => quiet(withBusy($, 'logout', () => pressLogout($)))} />
         </Box>
       </Box>
     )

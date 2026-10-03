@@ -273,3 +273,11 @@ describe('free account', () => {
     await pane.unmount()
   })
 })
+
+test('a successful /spotify answer draws in green; others stay the engine row', async ($, on) => {
+  fakeSpotify(on)
+  const props = (text: string) => ({ command: 'spotify', args: 'code …', text, isErrored: false }) as never
+  const good = await $.ui.mount({ plugin: 'spotify', surface: 'terminal', component: 'CommandOutput', props: props('✓ Connected to Spotify as Ada (Premium).') })
+  expect(await good.find({ type: 'Text', text: /Connected to Spotify as Ada/ })).toBeDefined()
+  await good.unmount()
+})

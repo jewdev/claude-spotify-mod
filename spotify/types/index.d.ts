@@ -94,6 +94,10 @@ declare module 'claude-code' {
       recap: RecapEntry[]
       /** true Premium, false free, null not known yet. */
       premium: boolean | null
+      /** Keys of the buttons whose work is running, so they can say so. */
+      busy: string[]
+      /** A success line shown in green above the prompt for a few seconds. */
+      flash: string
     }
   }
 }
